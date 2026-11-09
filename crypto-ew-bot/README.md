@@ -88,6 +88,10 @@ keine neuen Trades, kümmert sich aber weiter um die Stops.
   (Stops und Ziele laufen weiter).
 - `python -m ewbot kill --flatten`: zusätzlich werden die Positionen des Bots zum Marktpreis verkauft.
 - `python -m ewbot kill --clear` nimmt den Schalter wieder weg.
+- `kill` schreibt **nur die Datei** `state/KILL`. Ausgeführt wird sie vom laufenden Bot (innerhalb einer Minute) bzw. vom
+  nächsten `paper-step`. So kommen sich Befehl und laufender Bot nie in die Quere. Läuft der Bot nicht, passiert nichts.
+- Pro Zustandsdatei darf nur **ein** Prozess laufen (`run` oder `paper-step`); eine Sperrdatei `<zustand>.lock` verhindert Doppelstarts.
+  `status --clear-halt` geht deshalb nur bei gestopptem Bot.
 - Zusätzlich kannst du jederzeit in der Crypto.com-Oberfläche alle Orders löschen und den API-Key sperren.
 
 ## Dateien

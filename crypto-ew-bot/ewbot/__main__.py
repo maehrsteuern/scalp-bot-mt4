@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 
 from . import report
 from .config import Config, ConfigError, api_keys, load_config, load_dotenv
-from .engine import (CANDLE_MS, Engine, StateStore, new_state, run_cycle, run_loop, run_paper_step, utc_date)
+from .engine import (CANDLE_MS, Engine, StateLock, StateLockError, StateStore, new_state, run_cycle, run_loop,
+                     run_paper_step, utc_date)
 from .journal import Journal
 
 log = logging.getLogger("ewbot")
@@ -173,10 +174,23 @@ def open_paper(cfg: Config, state_path: str, client, now_ts: int):
     return eng
 
 
+LOCK_MSG = ("Abbruch: Der Zustand {p} wird schon von einem anderen Prozess benutzt (laeuft der Bot-Dienst schon?). "
+            "Zwei Prozesse auf demselben Zustand sind verboten.")
+
+
 def cmd_paper_step(args, cfg: Config) -> int:
+    state_path = args.state or cfg.state_path
+    try:
+        with StateLock(state_path):
+            return _paper_step_locked(args, cfg, state_path)
+    except StateLockError:
+        print(LOCK_MSG.format(p=state_path), file=sys.stderr)
+        return 3
+
+
+def _paper_step_locked(args, cfg: Config, state_path: str) -> int:
     client = make_client()
     now_ts = args.now_ts or int(time.time() * 1000)
-    state_path = args.state or cfg.state_path
     eng = open_paper(cfg, state_path, client, now_ts)
     summary = run_paper_step(eng, client, now_ts, args.seed_manual)
     if not args.no_html:
@@ -214,11 +228,26 @@ def cmd_run(args, cfg: Config) -> int:
         except (ValueError, OSError):
             pass
     now_ts = int(time.time() * 1000)
+    state_path = cfg.live_state_path if mode == "live" else (args.state or cfg.state_path)
     if mode == "live":
         err = check_live_gate(cfg, args.confirm_live)
         if err:
             print(err, file=sys.stderr)
             return 2
+    lock = StateLock(state_path)
+    try:
+        lock.acquire()
+    except StateLockError:
+        print(LOCK_MSG.format(p=state_path), file=sys.stderr)
+        return 3
+    try:
+        return _run_locked(args, cfg, mode, stop, now_ts)
+    finally:
+        lock.release()
+
+
+def _run_locked(args, cfg: Config, mode: str, stop: Dict[str, bool], now_ts: int) -> int:
+    if mode == "live":
         print(LIVE_WARNING, file=sys.stderr)
         client = make_client(private=True)
         store = StateStore(cfg.live_state_path)
@@ -250,9 +279,16 @@ def cmd_status(args, cfg: Config) -> int:
         return 0
     state = store.load()
     if args.clear_halt:
-        state["halt_new"] = False
-        store.save(state)
-        print("Sperre fuer neue Trades aufgehoben.")
+        try:
+            with StateLock(path):
+                state = store.load()
+                state["halt_new"] = False
+                store.save(state)
+            print("Sperre fuer neue Trades aufgehoben.")
+        except StateLockError:
+            print("Der Bot laeuft gerade und wuerde die Aenderung ueberschreiben. Erst stoppen "
+                  "(systemctl stop ewbot), dann --clear-halt, dann wieder starten.", file=sys.stderr)
+            return 3
     eng = Engine(cfg, None, state)
     s = eng.summary()
     print(f"Modus: {state.get('mode')} | Eigenkapital: {s['equity']:.2f} USD (Start {s['start_capital']:.2f}) | "
@@ -266,6 +302,8 @@ def cmd_status(args, cfg: Config) -> int:
 
 
 def cmd_kill(args, cfg: Config) -> int:
+    """Only writes (or removes) the KILL file. The running bot (or the next paper-step) acts on it - the CLI never
+    touches orders or the state file itself, so it cannot race with the running loop."""
     p = cfg.kill_path
     if args.clear:
         if os.path.exists(p):
@@ -277,29 +315,9 @@ def cmd_kill(args, cfg: Config) -> int:
         f.write("flatten\n" if args.flatten else "cancel\n")
     print(f"Kill-Schalter gesetzt ({p}): keine neuen Trades, offene Einstiege werden storniert"
           + (", Positionen werden zum Marktpreis verkauft." if args.flatten else "."))
-    # apply right away where we can (paper state or live with keys); a running bot also reacts within a minute
-    try:
-        if args.mode == "live":
-            k, s = api_keys()
-            store = StateStore(cfg.live_state_path)
-            if not (k and s and store.exists()):
-                print("Hinweis: Ein laufender Bot beachtet die Datei innerhalb einer Minute.")
-                return 0
-            client = make_client(private=True)
-            state = store.load()
-            eng = Engine(cfg, client, state, store, Journal(cfg.live_journal_path), load_infos(client, cfg), live=True)
-        else:
-            store = StateStore(cfg.state_path)
-            if not store.exists():
-                return 0
-            client = make_client()
-            eng = open_paper(cfg, cfg.state_path, client, int(time.time() * 1000))
-        eng.now_ts = int(time.time() * 1000)
-        eng.apply_kill()
-        eng.persist()
-        print("Sofort ausgefuehrt. Stand: " + json.dumps(eng.summary(), ensure_ascii=False))
-    except Exception as e:  # noqa: BLE001
-        print(f"Hinweis: Sofort-Ausfuehrung nicht moeglich ({e}). Ein laufender Bot beachtet die Datei innerhalb einer Minute.")
+    print("Der laufende Bot (Dienst) fuehrt das innerhalb einer Minute aus, ein paper-step beim naechsten Lauf.")
+    print("Achtung: Ohne laufenden Bot passiert NICHTS - und es gibt dann auch keinen Stop-Schutz. "
+          "Den Befehl im Bot-Ordner ausfuehren (WorkingDirectory des Dienstes), sonst liegt die Datei am falschen Ort.")
     return 0
 
 

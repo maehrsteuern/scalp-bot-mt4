@@ -9,3 +9,4 @@ config.yaml
 logs/
 data/hist/
 .pytest_cache/
+*.lock

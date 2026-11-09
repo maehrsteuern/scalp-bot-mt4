@@ -30,14 +30,14 @@
    }
   },
   "last_close": {
-   "BTC_USD": 74782.63,
-   "ETH_USD": 2125.46,
-   "SOL_USD": 86.48
+   "BTC_USD": 74950.82,
+   "ETH_USD": 2139.7,
+   "SOL_USD": 86.98
   },
   "last_t": {
-   "BTC_USD": 1794180600000,
-   "ETH_USD": 1794180600000,
-   "SOL_USD": 1794180600000
+   "BTC_USD": 1794182400000,
+   "ETH_USD": 1794182400000,
+   "SOL_USD": 1794182400000
   },
   "maker_fee": 0.0025,
   "orders": {
@@ -103,6 +103,7 @@
   "seq": 3,
   "slippage": 0.0005,
   "starting_balance": 1000.0,
+  "stop_px": {},
   "taker_fee": 0.005,
   "total": {
    "USD": 1000.0
@@ -111,9 +112,9 @@
  },
  "created_ts": 1794183162773,
  "cursor": {
-  "BTC_USD": 1794180600000,
-  "ETH_USD": 1794180600000,
-  "SOL_USD": 1794180600000
+  "BTC_USD": 1794182400000,
+  "ETH_USD": 1794182400000,
+  "SOL_USD": 1794182400000
  },
  "day": {
   "date": "2026-11-09",
@@ -127,15 +128,19 @@
   {
    "equity": 1000.0,
    "ts": 1794182400000
+  },
+  {
+   "equity": 1000.0,
+   "ts": 1794184200000
   }
  ],
  "halt_new": false,
  "last_prices": {
-  "BTC_USD": 74782.63,
-  "ETH_USD": 2125.46,
-  "SOL_USD": 86.48
+  "BTC_USD": 74950.82,
+  "ETH_USD": 2139.7,
+  "SOL_USD": 86.98
  },
- "last_step_ts": 1794182400000,
+ "last_step_ts": 1794184200000,
  "log": [
   "2026-11-08 22:50 UTC BTC: Limit-Kauf 0.005 @ 73900, Stop 72400, Risiko 7.50 USD",
   "2026-11-08 22:50 UTC ETH: Limit-Kauf 0.075 @ 2090, Stop 1990, Risiko 7.50 USD",

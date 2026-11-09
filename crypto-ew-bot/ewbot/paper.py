@@ -6,6 +6,8 @@ Fill model (candle based, no randomness):
 * MARKET fills on the first candle fed AFTER the order was placed, at candle.open +/- slippage. Taker fee.
 * An order can only fill on candles with t > the last candle time the broker had seen when the order was placed,
   so re-feeding the same candle is harmless and an order never fills on a candle from before its creation.
+* A MARKET SELL placed with `stop_price` (engine-triggered synthetic stop) fills at min(stop_price, next open) minus
+  slippage - it does NOT get the better open of a candle that recovered after a wick through the stop.
 * Orders are processed in order-id sequence. No partial fills.
 * Funds are reserved at placement (BUY: price*qty*(1+fee reserve), SELL: base qty); insufficient funds raise
   ExchangeError, like a real exchange rejection.
@@ -36,6 +38,8 @@ def _r(x: float) -> float:
 
 
 class PaperBroker:
+    supports_stop_price = True     # place_market(..., stop_price=x) is understood
+
     def __init__(self, starting_balance: float = 1000.0, quote: str = "USD",
                  maker_fee: float = 0.0025, taker_fee: float = 0.005, slippage: float = 0.0005,
                  instruments: Optional[dict[str, InstrumentInfo]] = None):
@@ -50,6 +54,7 @@ class PaperBroker:
         self.orders: dict[str, Order] = {}
         self._placed_after: dict[str, int] = {}   # order_id -> candle t seen at placement
         self._reserve: dict[str, float] = {}      # order_id -> reserved amount (in reserve currency)
+        self._stop_px: dict[str, float] = {}      # order_id -> stop level of a stop-triggered market sell
         self._last_t: dict[str, int] = {}         # instrument -> last candle t fed
         self._last_close: dict[str, float] = {}
         self._seq = 0
@@ -146,7 +151,8 @@ class PaperBroker:
         self._placed_after[oid] = self._now(instrument)
         return oid
 
-    def place_market(self, instrument: str, side: str, qty: float, client_oid: str) -> str:
+    def place_market(self, instrument: str, side: str, qty: float, client_oid: str,
+                     stop_price: Optional[float] = None) -> str:
         info, side, q = self._check_new(instrument, side, qty, client_oid)
         oid = self._new_id()
         order = Order(order_id=oid, client_oid=client_oid, instrument=instrument, side=side, type="MARKET",
@@ -155,6 +161,8 @@ class PaperBroker:
         self._reserve_funds(order, info, est * (1 + self.slippage) if est else None)
         self.orders[oid] = order
         self._placed_after[oid] = self._now(instrument)
+        if stop_price is not None and side == "SELL":
+            self._stop_px[oid] = float(stop_price)
         return oid
 
     def cancel(self, instrument: str, order_id: str) -> None:
@@ -195,7 +203,10 @@ class PaperBroker:
             if candle.t <= self._placed_after.get(oid, 0):
                 continue
             if o.type == "MARKET":
-                px = candle.o * (1 + self.slippage) if o.side == "BUY" else candle.o * (1 - self.slippage)
+                base_px = candle.o
+                if o.side == "SELL" and oid in self._stop_px:
+                    base_px = min(self._stop_px[oid], candle.o)
+                px = base_px * (1 + self.slippage) if o.side == "BUY" else base_px * (1 - self.slippage)
                 px = float(quantize_to_tick(px, info.price_tick, "up" if o.side == "BUY" else "down"))
                 fee_rate = self.taker_fee
             else:
@@ -243,6 +254,7 @@ class PaperBroker:
             "total": dict(self.total), "reserved": dict(self.reserved),
             "orders": {k: asdict(v) for k, v in self.orders.items()},
             "placed_after": dict(self._placed_after), "reserve": dict(self._reserve),
+            "stop_px": dict(self._stop_px),
             "last_t": dict(self._last_t), "last_close": dict(self._last_close), "seq": self._seq,
         }
 
@@ -258,5 +270,6 @@ class PaperBroker:
         b._reserve = {k: float(v) for k, v in d["reserve"].items()}
         b._last_t = {k: int(v) for k, v in d["last_t"].items()}
         b._last_close = {k: float(v) for k, v in d["last_close"].items()}
+        b._stop_px = {k: float(v) for k, v in d.get("stop_px", {}).items()}
         b._seq = int(d["seq"])
         return b

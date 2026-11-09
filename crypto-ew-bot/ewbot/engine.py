@@ -33,6 +33,7 @@ log = logging.getLogger("ewbot")
 
 CANDLE_MS = 30 * 60 * 1000
 H4_MS = 4 * 3600 * 1000
+TERMINAL = ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
 ACTIVE = ("ENTRY_PENDING", "OPEN", "OPEN_BE", "CLOSING")
 POSITION = ("OPEN", "OPEN_BE", "CLOSING")
 
@@ -53,6 +54,50 @@ def new_state(mode: str, capital: float, now_ts: int = 0) -> Dict[str, Any]:
         "day": {"date": utc_date(now_ts) if now_ts else "", "start_equity": float(capital)},
         "equity_curve": [], "last_prices": {}, "halt_new": False, "log": [], "last_step_ts": 0,
     }
+
+
+class StateLockError(Exception):
+    pass
+
+
+class StateLock:
+    """Exclusive, non-blocking lock on '<state>.lock' (fcntl.flock) so that two processes (run / paper-step)
+    can never work on the same state file. No-op with a warning where fcntl does not exist (Windows)."""
+
+    def __init__(self, state_path: str):
+        self.path = state_path + ".lock"
+        self._fh = None
+
+    def acquire(self) -> "StateLock":
+        try:
+            import fcntl
+        except ImportError:                                    # pragma: no cover - Windows
+            log.warning("Kein Datei-Lock auf diesem System - starte den Bot nie doppelt auf demselben Zustand!")
+            return self
+        d = os.path.dirname(self.path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fh = open(self.path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            raise StateLockError(f"Zustand {self.path[:-5]} wird schon von einem anderen Prozess benutzt")
+        self._fh = fh
+        return self
+
+    def release(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()            # closing drops the flock
+            finally:
+                self._fh = None
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *a):
+        self.release()
 
 
 class StateStore:
@@ -84,7 +129,8 @@ class StateStore:
 class Engine:
     def __init__(self, cfg, broker, state: Dict[str, Any], store: Optional[StateStore] = None,
                  journal: Optional[Journal] = None, infos: Optional[Dict[str, Any]] = None,
-                 strategy_fn: Optional[Callable] = None, live: bool = False):
+                 strategy_fn: Optional[Callable] = None, live: bool = False,
+                 sleep: Optional[Callable[[float], None]] = None):
         self.cfg = cfg
         self.broker = broker
         self.state = state
@@ -99,6 +145,8 @@ class Engine:
         self.safe_mode = False          # set on API errors -> no new entries in this cycle
         self.events: List[Dict[str, Any]] = []
         self._prestop: Dict[str, bool] = {}
+        self.sleep = sleep or time.sleep
+        self.wall_now: Optional[int] = None   # run mode only: wall clock of the current cycle (candles may be replayed)
 
     # ----- small helpers
     def _say(self, msg: str, level: int = logging.INFO) -> None:
@@ -225,6 +273,45 @@ class Engine:
             log.debug("Cancel %s: %s", order_id, e)
             return False
 
+    @staticmethod
+    def _is_unknown(e: BaseException) -> bool:
+        return type(e).__name__ == "OrderStateUnknown"
+
+    def _settle(self, order_id: Optional[str], tries: int = 3):
+        """Poll an order until it is terminal (FILLED/CANCELED/...). Live: up to `tries` polls, 0.5 s apart.
+        Returns the Order, or None if it is still (possibly) active or cannot be read."""
+        if not order_id:
+            return None
+        for i in range(tries if self.live else 1):
+            if i:
+                self.sleep(0.5)
+            o = self._poll(order_id)
+            if o is not None and o.status in TERMINAL:
+                return o
+        return None
+
+    def _is_dust(self, t: Dict[str, Any], qty: Optional[float] = None) -> bool:
+        """Remainder below the qty tick or below the minimum notional: cannot be sold, treat as closed."""
+        inst = t["instrument"]
+        qty = t["remaining"] if qty is None else qty
+        if qty <= 1e-12 or self._round_qty(inst, qty) <= 0:
+            return True
+        info = self._info(inst)
+        min_n = (getattr(info, "min_notional", 0.0) or 0.0) or self.cfg.min_notional_usd
+        px = self.state["last_prices"].get(inst) or t.get("entry_price") or 0.0
+        return bool(px) and qty * px < min_n
+
+    def _close_dust(self, t: Dict[str, Any], why: str) -> None:
+        rem = t["remaining"]
+        if rem > 1e-12 and t.get("entry_qty"):
+            loss = t["cost"] * rem / t["entry_qty"]          # conservative: write the unsellable rest off
+            t["realized"] = t.get("realized", 0.0) - loss
+            self.state["pnl_events"].append({"ts": self.now_ts, "pnl": -loss, "trade": t["id"]})
+            t["dust"] = rem
+            self._say(f"{t['coin']}: Rest {rem:g} zu klein zum Verkaufen - als Verlust abgeschrieben", logging.WARNING)
+        t["remaining"] = 0.0
+        self._close(t, why)
+
     # ----- recording fills
     def _record_buy(self, t: Dict[str, Any], o) -> None:
         qty = float(o.filled_qty)
@@ -236,7 +323,7 @@ class Engine:
         t["cost"] = qty * px + fee
         t["remaining"] = qty
         t["fees"] = t.get("fees", 0.0) + fee
-        t["opened_ts"] = self.now_ts
+        t["opened_ts"] = (int(getattr(o, "updated_ts", 0) or 0) if self.live else 0) or self.now_ts
         self._log_fill(t, "BUY", qty, px, fee, o.order_id, "Einstieg")
         self.events.append({"type": "fill", "trade": t["id"], "coin": t["coin"], "side": "BUY",
                             "qty": qty, "price": px, "ts": self.now_ts})
@@ -323,9 +410,16 @@ class Engine:
         }
         self.state["seen_signals"].append(sig.id)
         self.trades[sig.id] = t
+        t["entry_oid"] = self._oid(t, "E")
         try:
-            t["entry_order"] = self.broker.place_limit(sig.instrument, "BUY", res.qty, price, self._oid(t, "E"))
+            t["entry_order"] = self.broker.place_limit(sig.instrument, "BUY", res.qty, price, t["entry_oid"])
         except Exception as e:  # noqa: BLE001
+            if self._is_unknown(e):
+                # The order may exist on the exchange: keep the trade (entry_order None, client_oid stored);
+                # sync_orders resolves it via client_oid. Never delete a trade whose fill we cannot rule out.
+                self._err(f"Entry-Order fuer {sig.coin}: Status unklar: {e}", e)
+                self.persist()
+                return t
             del self.trades[sig.id]
             self._err(f"Entry-Order fuer {sig.coin} fehlgeschlagen: {e}", e)
             self.persist()
@@ -353,7 +447,41 @@ class Engine:
             if before != (t["state"], t["remaining"], t["entry_qty"]):
                 self.persist()
 
+    def _resolve_entry(self, t) -> str:
+        """'ok' (entry_order known) | 'absent' (exchange definitely has no such order) | 'error' (unknown)."""
+        if t.get("entry_order"):
+            return "ok"
+        oid = t.get("entry_oid")
+        if not oid:
+            return "absent"
+        fn = getattr(self.broker, "get_order_by_client_oid", None)
+        if fn is None:
+            return "error"
+        try:
+            o = fn(oid)
+            if o is None and hasattr(self.broker, "open_orders"):
+                o = next((x for x in self.broker.open_orders(t["instrument"]) if x.client_oid == oid), None)
+        except Exception as e:  # noqa: BLE001
+            self._err(f"Entry-Order {oid} nicht abfragbar: {e}")
+            return "error"
+        if o is None:
+            return "absent"
+        t["entry_order"] = o.order_id
+        self._say(f"{t['coin']}: Entry-Order {o.order_id} ueber client_oid gefunden")
+        self.persist()
+        return "ok"
+
     def _sync_entry(self, t) -> None:
+        r = self._resolve_entry(t)
+        if r == "error":
+            return
+        if r == "absent":
+            if t.get("entry_oid"):
+                t["state"] = "CANCELED"
+                t["closed_ts"] = self.now_ts
+                t["close_reason"] = "Order nicht bei der Boerse gefunden"
+                self._say(f"{t['coin']}: Entry-Order existiert nicht - Trade verworfen")
+            return
         o = self._poll(t["entry_order"])
         if o is None:
             return
@@ -361,6 +489,15 @@ class Engine:
         if o.status == "FILLED" or (o.status in ("CANCELED", "EXPIRED", "REJECTED") and filled > 0):
             self._record_buy(t, o)
             self._open_position(t)
+        elif filled > 0 and o.status not in TERMINAL:
+            # partly filled: cancel the rest and manage what we really got
+            self._cancel(t["instrument"], t["entry_order"])
+            o2 = self._settle(t["entry_order"])
+            if o2 is not None and float(o2.filled_qty or 0.0) > 0:
+                self._record_buy(t, o2)
+                self._open_position(t)
+            elif o2 is None:
+                self._say(f"{t['coin']}: Teil-Fuellung, Rest-Stornierung noch offen - naechster Versuch", logging.WARNING)
         elif o.status in ("CANCELED", "EXPIRED", "REJECTED"):
             t["state"] = "CANCELED"
             t["closed_ts"] = self.now_ts
@@ -372,6 +509,24 @@ class Engine:
         sig = t["signal"]
         qty = t["entry_qty"]
         inst = t["instrument"]
+        if self._round_qty(inst, qty) <= 0:
+            self._close_dust(t, "Menge zu klein")
+            self.persist()
+            return
+        balance_unknown = False
+        if self.live:                       # never place exits for more than is really there (fees in base coin etc.)
+            try:
+                avail = float(self.broker.get_balances().get(inst.split("_")[0], 0.0))
+                if avail + 1e-12 < qty:
+                    self._say(f"{t['coin']}: Bestand {avail:g} kleiner als gekaufte Menge {qty:g} - verkaufe nur den Bestand",
+                              logging.WARNING)
+                    if avail < qty * 0.99:
+                        self.state["halt_new"] = True
+                    qty = min(qty, self._round_qty(inst, avail))
+                    t["remaining"] = min(t["remaining"], qty)
+            except Exception as e:  # noqa: BLE001
+                self._err(f"Bestand fuer {t['coin']} nicht abrufbar: {e}")
+                balance_unknown = True
         t1q = self._round_qty(inst, qty * 0.5)
         info = self._info(inst)
         min_n = max(self.cfg.min_notional_usd, getattr(info, "min_notional", 0.0) or 0.0)
@@ -380,6 +535,10 @@ class Engine:
             t1q, t2q = 0.0, self._round_qty(inst, qty)
             t["t1_done"] = True        # position too small to split: everything goes to T2, no break-even move
         t["t1_qty"], t["t2_qty"] = t1q, t2q
+        if balance_unknown:
+            t["exit_orders_missing"] = True
+            self.persist()
+            return
         try:
             if t1q > 0:
                 t["t1_order"] = self.broker.place_limit(inst, "SELL", t1q, float(self.broker.round_price(inst, sig["t1"])),
@@ -431,33 +590,57 @@ class Engine:
             return
         if o.status == "FILLED" or (o.status in ("CANCELED", "EXPIRED") and float(o.filled_qty or 0) > 0):
             self._record_sell(t, o, t.get("close_why", "Stop"))
-            if t["remaining"] > 1e-12:           # partial: sell the rest again
+            t["stop_oid"] = None                 # this client_oid is used up; a retry gets a new one
+            if t["remaining"] > 1e-12 and self._is_dust(t):
+                self._close_dust(t, t.get("close_why", "Stop"))
+            elif t["remaining"] > 1e-12:         # partial: sell the rest again
                 t["state"] = "OPEN"
                 self.stop_out(t, t.get("close_why", "Stop"))
             else:
                 self._close(t, t.get("close_why", "Stop"))
         elif o.status in ("CANCELED", "EXPIRED", "REJECTED"):
+            t["stop_oid"] = None
             self._say(f"{t['coin']}: Stop-Verkauf {o.status} - neuer Versuch", logging.WARNING)
             t["state"] = "OPEN"
             t["stop_pending"] = t.get("close_why", "Stop")
 
     # ----- synthetic stop
-    def stop_out(self, t, why: str = "Stop") -> None:
-        """Cancel resting exits and sell the rest of the bot's own position at MARKET."""
+    def stop_out(self, t, why: str = "Stop", stop_level: Optional[float] = None) -> None:
+        """Cancel resting exits (confirmed!) and sell the rest of the bot's own position at MARKET.
+
+        An exit order id is only forgotten once the exchange shows it FILLED/CANCELED. If a cancel cannot be
+        confirmed, no stop-sell is sent (the resting TP could sell the same coins again): halt_new is set and the
+        next cycle retries (`stop_pending`). The stop-sell keeps ONE client_oid across retries and is looked up
+        by it before it is re-sent, so a retry can never double-sell."""
         if t["state"] not in ("OPEN", "OPEN_BE"):
             return
         inst = t["instrument"]
-        for k in ("t1_order", "t2_order"):
-            if t.get(k):
-                self._cancel(inst, t[k])
-        # exits may have filled while we cancelled -> take them into account first
+        if stop_level is not None:
+            t["stop_level"] = stop_level
+        blocked = []
         for k, label, done in (("t1_order", "Ziel 1", "t1_done"), ("t2_order", "Ziel 2", "t2_done")):
-            if t.get(k) and not t.get(done):
-                o = self._poll(t[k])
-                if o is not None and o.status in ("FILLED", "CANCELED", "EXPIRED") and float(o.filled_qty or 0) > 0:
-                    self._record_sell(t, o, label)
-                    t[done] = True
-        t["t1_order"] = t["t2_order"] = None
+            oid = t.get(k)
+            if not oid:
+                continue
+            if t.get(done):                    # already booked as filled
+                t[k] = None
+                continue
+            self._cancel(inst, oid)
+            o = self._settle(oid)
+            if o is None:
+                blocked.append(oid)
+                continue
+            if float(o.filled_qty or 0) > 0:   # filled (maybe partly) while we cancelled -> book it first
+                self._record_sell(t, o, label)
+                t[done] = True
+            t[k] = None
+        if blocked:
+            t["stop_pending"] = why
+            self.state["halt_new"] = True
+            self._err(f"{t['coin']}: Ziel-Order {', '.join(blocked)} nicht als storniert bestaetigt - "
+                      "kein Stop-Verkauf, neuer Versuch im naechsten Durchlauf", None)
+            self.persist()
+            return
         if t["remaining"] <= 1e-12:
             self._close(t, "Ziele")
             self.persist()
@@ -466,16 +649,53 @@ class Engine:
         if self.live:                      # never sell more than is really there
             try:
                 base = inst.split("_")[0]
-                qty = min(qty, self._round_qty(inst, float(self.broker.get_balances().get(base, 0.0))))
+                avail = self._round_qty(inst, float(self.broker.get_balances().get(base, 0.0)))
+                if avail < qty:
+                    self._say(f"{t['coin']}: Bestand {avail:g} kleiner als erwartet {qty:g}", logging.WARNING)
+                qty = min(qty, avail)
+                if qty <= 0 and t["remaining"] > 1e-12:
+                    # nothing there to sell (sold by hand?) - stop the endless retry, flag for manual check
+                    self.state["halt_new"] = True
+                    self._err(f"{t['coin']}: kein Bestand mehr - Position wird als beendet markiert, bitte manuell pruefen")
+                    t["stop_pending"] = None
+                    self._close_dust(t, "Bestand fehlt")
+                    self.persist()
+                    return
             except Exception as e:  # noqa: BLE001
                 self._err(f"Bestand nicht abrufbar: {e}")
-        if qty <= 0:
-            self._err(f"{t['coin']}: keine verkaufbare Menge gefunden - bitte manuell pruefen")
-            t["stop_pending"] = why
+        if qty <= 0 or self._is_dust(t, qty):
+            t["stop_pending"] = None
+            self._close_dust(t, why)
             self.persist()
             return
+        retry = bool(t.get("stop_oid"))
+        coid = t.get("stop_oid") or self._oid(t, "S")
+        t["stop_oid"] = coid
+        if retry:                          # a previous attempt may have reached the exchange: look before re-sending
+            fn = getattr(self.broker, "get_order_by_client_oid", None)
+            if fn is not None:
+                try:
+                    ex = fn(coid)
+                except Exception as e:  # noqa: BLE001
+                    self._err(f"Stop-Verkauf {t['coin']}: Abfrage per client_oid fehlgeschlagen: {e}")
+                    t["stop_pending"] = why
+                    self.persist()
+                    return
+                if ex is not None:
+                    t["stop_order"] = ex.order_id
+                    t["stop_pending"] = None
+                    t["state"] = "CLOSING"
+                    t["close_why"] = why
+                    self._say(f"{t['coin']}: bereits gesendeter Stop-Verkauf {ex.order_id} uebernommen", logging.WARNING)
+                    self.persist()
+                    return
+        self.persist()                     # remember the client_oid BEFORE sending
+        kw = {}
+        if not self.live and getattr(self.broker, "supports_stop_price", False) and t.get("stop_level") is not None \
+                and why.startswith("Stop"):
+            kw["stop_price"] = t["stop_level"]       # paper: fill at min(stop, next open), not at a recovered open
         try:
-            t["stop_order"] = self.broker.place_market(inst, "SELL", qty, self._oid(t, "S"))
+            t["stop_order"] = self.broker.place_market(inst, "SELL", qty, coid, **kw)
         except Exception as e:  # noqa: BLE001
             self._err(f"STOP-VERKAUF {t['coin']} fehlgeschlagen: {e} - neuer Versuch im naechsten Durchlauf", e)
             t["stop_pending"] = why
@@ -490,13 +710,17 @@ class Engine:
     def cancel_entry(self, t, why: str) -> None:
         if t["state"] != "ENTRY_PENDING":
             return
-        self._cancel(t["instrument"], t["entry_order"])
-        o = self._poll(t["entry_order"])
+        r = self._resolve_entry(t)
+        if r == "error":
+            return                                             # cannot rule out a live order -> retry next cycle
+        if r == "ok":
+            self._cancel(t["instrument"], t["entry_order"])
+        o = self._poll(t["entry_order"]) if r == "ok" else None
         if o is not None and float(o.filled_qty or 0) > 0:     # got (partly) filled in the meantime
             self._record_buy(t, o)
             self._open_position(t)
             return
-        if o is None and self.live:
+        if o is None and self.live and r == "ok":
             return                                             # unknown -> keep, retry next cycle
         t["state"] = "CANCELED"
         t["closed_ts"] = self.now_ts
@@ -516,6 +740,11 @@ class Engine:
             elif mode == "flatten" and t["state"] in ("OPEN", "OPEN_BE"):
                 self.stop_out(t, "KILL (flatten)")
 
+    def _candle_counts(self, t: Dict[str, Any], c: Candle) -> bool:
+        """Live: a candle only counts for the stop if it opened at/after the position was opened (candles replayed
+        after downtime must not stop out a position with lows from before it existed). Paper keeps its model."""
+        return (not self.live) or c.t >= (t.get("opened_ts") or 0)
+
     # ----- candle processing (paper-step and closed candles in run mode)
     def handle_candle(self, instrument: str, c: Candle, hist30: Optional[List[Candle]] = None,
                       hist4h: Optional[List[Candle]] = None) -> None:
@@ -532,7 +761,7 @@ class Engine:
         for t in mine:
             if t["state"] == "ENTRY_PENDING" and c.t >= t["signal"]["valid_until_ts"]:
                 self.cancel_entry(t, "abgelaufen")
-            elif t["state"] in ("OPEN", "OPEN_BE") and c.l <= t["stop"]:
+            elif t["state"] in ("OPEN", "OPEN_BE") and c.l <= t["stop"] and self._candle_counts(t, c):
                 for k in ("t1_order", "t2_order"):
                     if t.get(k):
                         self._cancel(instrument, t[k])
@@ -544,8 +773,9 @@ class Engine:
         # D) synthetic stop on the candle low (stop level as it was before this candle)
         for t in list(self.trades.values()):
             if t["instrument"] == instrument and t["state"] in ("OPEN", "OPEN_BE"):
-                if c.l <= stop_before.get(t["id"], t["stop"]):
-                    self.stop_out(t, "Stop" if t["state"] == "OPEN" else "Stop (Break-even)")
+                lvl = stop_before.get(t["id"], t["stop"])
+                if c.l <= lvl and self._candle_counts(t, c):
+                    self.stop_out(t, "Stop" if t["state"] == "OPEN" else "Stop (Break-even)", stop_level=lvl)
         # E) cancel unfilled entries: price already at/above target, or close under the wave low
         for t in list(self.trades.values()):
             if t["instrument"] == instrument and t["state"] == "ENTRY_PENDING":
@@ -564,8 +794,12 @@ class Engine:
                 and not self.kill_mode():
             try:
                 c4 = [x for x in (hist4h or []) if x.t + H4_MS <= close_ts]
+                wall = self.wall_now
                 for sig in self.strategy_fn(coin, instrument, hist30, c4, now_ts=close_ts) or []:
-                    self.consider_signal(sig, close_ts)
+                    if wall is not None and sig.created_ts <= wall - CANDLE_MS:
+                        self._say(f"{coin}: altes Signal {sig.id} (Nachlauf nach Pause) ignoriert")
+                        continue
+                    self.consider_signal(sig, wall if wall is not None else close_ts)
             except Exception as e:  # noqa: BLE001
                 self._err(f"Strategie-Fehler {coin}: {e}")
         self.persist()
@@ -782,31 +1016,47 @@ def run_loop(engine: Engine, client, stop_flag: Callable[[], bool], poll_s: int 
 
 
 def run_cycle(engine: Engine, client, now_ts: int) -> None:
+    """One loop cycle. Order: (1) sync every order, (2) fetch ALL data, (3) process. Any API error in (1)/(2)
+    sets safe_mode, so no new entry is opened in this cycle."""
     engine.begin_cycle(now_ts)
     engine.events = []
+    engine.wall_now = now_ts
     cfg = engine.cfg
-    engine.apply_kill()
-    # new closed candles first (they decide entries), then ticker stops
-    for coin, inst in cfg.instruments.items():
-        last_t = engine.state["cursor"].get(inst)
-        try:
-            new = collect_new_candles(client, inst, last_t, now_ts)
-            if last_t is None and new:
-                engine.state["cursor"][inst] = new[-1].t - CANDLE_MS
-                last_t = new[-1].t - CANDLE_MS
-            new = [c for c in new if c.t > last_t]
-            if new:
-                h30 = sorted(client.get_candles(inst, "30m", 300), key=lambda x: x.t)
-                h4 = sorted(client.get_candles(inst, "4h", 300), key=lambda x: x.t)
-            for c in new:
-                engine.handle_candle(inst, c, [x for x in h30 if x.t <= c.t], h4)
-                engine.record_equity(c.t + CANDLE_MS)
-        except Exception as e:  # noqa: BLE001
-            engine._err(f"Kerzen {inst}: {e}")
-        try:
-            tk = client.get_ticker(inst)
-            engine.check_price(inst, float(tk.get("bid") or 0), float(tk.get("last") or 0), now_ts)
-        except Exception as e:  # noqa: BLE001
-            engine._err(f"Ticker {inst}: {e}")
-    engine.sync_orders()
-    engine.persist()
+    try:
+        engine.apply_kill()
+        engine.sync_orders()
+        data: Dict[str, Dict[str, Any]] = {}
+        for coin, inst in cfg.instruments.items():
+            d: Dict[str, Any] = {"new": [], "h30": [], "h4": [], "tk": None}
+            last_t = engine.state["cursor"].get(inst)
+            try:
+                new = collect_new_candles(client, inst, last_t, now_ts)
+                if last_t is None and new:
+                    engine.state["cursor"][inst] = new[-1].t - CANDLE_MS
+                    last_t = new[-1].t - CANDLE_MS
+                d["new"] = [c for c in new if c.t > last_t]
+                if d["new"]:
+                    d["h30"] = sorted(client.get_candles(inst, "30m", 300), key=lambda x: x.t)
+                    d["h4"] = sorted(client.get_candles(inst, "4h", 300), key=lambda x: x.t)
+            except Exception as e:  # noqa: BLE001
+                d["new"] = []
+                engine._err(f"Kerzen {inst}: {e}")
+            try:
+                d["tk"] = client.get_ticker(inst)
+            except Exception as e:  # noqa: BLE001
+                engine._err(f"Ticker {inst}: {e}")
+            data[inst] = d
+        for coin, inst in cfg.instruments.items():
+            d = data[inst]
+            try:
+                for c in d["new"]:
+                    engine.handle_candle(inst, c, [x for x in d["h30"] if x.t <= c.t], d["h4"])
+                    engine.record_equity(c.t + CANDLE_MS)
+            except Exception as e:  # noqa: BLE001
+                engine._err(f"Kerzen {inst}: {e}")
+            if d["tk"] is not None:
+                engine.check_price(inst, float(d["tk"].get("bid") or 0), float(d["tk"].get("last") or 0), now_ts)
+        engine.sync_orders()
+        engine.persist()
+    finally:
+        engine.wall_now = None

@@ -92,7 +92,23 @@ Offene Positionen bleiben im Zustand erhalten. Starte neu am besten, wenn keine 
 - **Sanft:** `systemctl stop ewbot` – der Bot beendet den Durchlauf. **Achtung:** Danach gibt es keinen Stop mehr für offene Positionen!
 - **Not-Aus ohne Dienst zu stoppen:** `python -m ewbot kill` (keine neuen Trades, Einstiege stornieren) oder
   `python -m ewbot kill --flatten` (zusätzlich Positionen verkaufen).
+  - `kill` **immer im Bot-Ordner** ausführen (`cd /home/ewbot/repo/crypto-ew-bot`, das ist `WorkingDirectory` im Dienst) – sonst
+    legt der Befehl die Datei `state/KILL` an einem anderen Ort an und der Bot sieht sie nicht.
+  - `kill` schreibt nur die Datei; der **laufende Bot** führt sie innerhalb einer Minute aus. Ohne laufenden Bot passiert nichts.
 - **Dauerhaft:** `systemctl disable --now ewbot`, danach Orders in der Crypto.com-Oberfläche prüfen und den API-Key löschen.
+
+## 8a. Wichtig: Ohne laufenden Prozess gibt es KEINEN Stop-Schutz
+
+Der Stop-Loss ist **synthetisch** (der Bot prüft ihn selbst, die Börse kennt ihn nicht). Ist der Bot aus, abgestürzt oder
+der Server weg, wird nichts verkauft, auch wenn der Kurs weit unter den Stop fällt. Deshalb:
+
+- Der Dienst nutzt `Restart=always` (siehe `deploy/ewbot.service`, ist gesetzt, `RestartSec=10`). Nach einem Absturz oder
+  Neustart läuft der Bot von selbst weiter, holt verpasste Kerzen nach und prüft alle Stops. Nach Pausen eröffnet er aus alten
+  Kerzen **keine** neuen Einstiege.
+- `systemctl status ewbot` regelmäßig ansehen, bei offener Position besonders.
+- **Mögliche spätere Sicherung (NICHT aktiv, nicht geprüft):** ein Stop-Loss-Auftrag direkt bei der Börse (`STOP_LOSS` bei
+  `private/create-order`). Ob und wie das für Spot bei Crypto.com funktioniert, ist nicht verifiziert; der Bot nutzt es heute nicht.
+  Bis dahin ist der Stop nur so zuverlässig wie der Server.
 
 ## 9. Täglicher Blick (1 Minute)
 

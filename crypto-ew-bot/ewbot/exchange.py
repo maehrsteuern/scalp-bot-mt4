@@ -537,6 +537,7 @@ class CryptoComClient:
             val = _f(d.get("cumulative_value"))
             avg = val / filled if val > 0 else None
         fee = _f(d.get("cumulative_fee"))
+        fee_raw = fee
         inst = str(d.get("instrument_name", ""))
         fee_ccy = str(d.get("fee_instrument_name", "") or "")
         quote = inst.split("_")[1] if "_" in inst else ""
@@ -548,13 +549,21 @@ class CryptoComClient:
             else:
                 log.warning("order %s: fee in %s cannot be converted to %s; fee set to 0", d.get("order_id"), fee_ccy, quote)
                 fee = 0.0
-        return Order(
+        side = str(d.get("side", "")).upper()
+        if side == "BUY" and fee_raw and fee_ccy and fee_ccy == base and filled > 0:
+            # Fee charged in the BASE coin: the gross filled quantity is NOT what lands in the wallet.
+            # Convention: Order.filled_qty is the NET quantity (gross - fee) for such BUY orders, and `fee` stays
+            # the quote-equivalent (fee * avg), so that qty_net * avg + fee == gross cost. See Order.fee_ccy below.
+            filled = max(0.0, filled - fee_raw)
+        order = Order(
             order_id=str(d.get("order_id", "")), client_oid=str(d.get("client_oid", "") or ""),
             instrument=inst, side=str(d.get("side", "")).upper(),
             type=str(d.get("order_type", d.get("type", ""))).upper(), qty=qty, price=limit_price,
             status=status, filled_qty=filled, avg_price=avg, fee=fee,
             created_ts=_i(d.get("create_time")), updated_ts=_i(d.get("update_time")),
         )
+        order.fee_ccy = fee_ccy        # extra attribute (not a dataclass field): currency the fee was charged in
+        return order
 
     def _detail(self, method: str, params: dict) -> Optional[Order]:
         try:
