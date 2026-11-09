@@ -52,6 +52,52 @@ def fetch_history(instrument: str, tf: str, max_candles: int = 30000, pause: flo
     return [r for r in out if r[0] + step <= now]  # closed only
 
 
+def fetch_range(instrument: str, tf: str, start_ts: int, end_ts: int | None = None, pause: float = 0.15) -> List[list]:
+    """Page backwards from end_ts (default: now) until start_ts or until the API returns nothing. Closed candles only."""
+    step = TF_MS[tf]
+    rows = {}
+    end = end_ts if end_ts is not None else int(time.time() * 1000)
+    while end > start_ts:
+        data = _get(instrument, tf, 300, end, retries=8)
+        if not data:
+            # the exchange has holes (e.g. June 2021) and coins that were not listed yet: skip one page back
+            end -= 20 * step      # small step: the API returns nothing if its short look-back window holds no candle
+            time.sleep(pause)
+            continue
+        new = 0
+        for d in data:
+            t = int(d["t"])
+            if t not in rows:
+                rows[t] = [t, float(d["o"]), float(d["h"]), float(d["l"]), float(d["c"]), float(d["v"])]
+                new += 1
+        if min(rows) <= start_ts:
+            break
+        end = min(end, min(rows)) - 1 if new else end - 20 * step
+        time.sleep(pause)
+    now = int(time.time() * 1000)
+    return [rows[t] for t in sorted(rows) if t >= start_ts and t + step <= now]
+
+
+def merge_rows(*lists: List[list]) -> List[list]:
+    """Merge candle lists, dedupe by open time (later list wins), ascending."""
+    m = {}
+    for lst in lists:
+        for r in lst:
+            m[int(r[0])] = r
+    return [m[t] for t in sorted(m)]
+
+
+def gap_report(rows: List[list], tf: str) -> dict:
+    """Missing candles inside the series: number of gaps, missing candles, longest gap (in candles)."""
+    step = TF_MS[tf]
+    gaps, missing, longest = 0, 0, 0
+    for a, b in zip(rows, rows[1:]):
+        n = int((b[0] - a[0]) // step) - 1
+        if n > 0:
+            gaps += 1; missing += n; longest = max(longest, n)
+    return dict(gaps=gaps, missing=missing, longest=longest)
+
+
 def cache_path(coin: str, tf: str) -> str:
     return os.path.join(DATA_DIR, "hist", f"{coin}_{tf}.json")
 
@@ -76,5 +122,32 @@ def download_all(coins=("BTC", "ETH", "SOL"), tfs=("30m", "4h")):
                 print(f"{c} {tf}: nothing downloaded")
 
 
+def extend_history(coins=("BTC", "ETH", "SOL"), tfs=("30m", "4h"), start_ts: int = 1609459200000, threads: int = 3):
+    """Extend the cache back to start_ts (default 2021-01-01) and forward to now. Existing cache is kept and merged."""
+    from concurrent.futures import ThreadPoolExecutor
+    os.makedirs(os.path.join(DATA_DIR, "hist"), exist_ok=True)
+
+    def job(c):
+        for tf in tfs:
+            try:
+                old = load_history(c, tf)
+            except Exception:
+                old = []
+            new = fetch_range(f"{c}_USD", tf, start_ts)
+            rows = merge_rows(old, new)
+            with open(cache_path(c, tf), "w") as f:
+                json.dump(rows, f)
+            g = gap_report(rows, tf)
+            print(f"{c} {tf}: {len(rows)} candles {time.strftime('%Y-%m-%d', time.gmtime(rows[0][0]/1000))} .. "
+                  f"{time.strftime('%Y-%m-%d', time.gmtime(rows[-1][0]/1000))} gaps={g}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        list(ex.map(job, coins))
+
+
 if __name__ == "__main__":
-    download_all()
+    import sys
+    if "--extend" in sys.argv:
+        extend_history()
+    else:
+        download_all()
