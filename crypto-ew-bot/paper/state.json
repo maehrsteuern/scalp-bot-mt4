@@ -1,0 +1,290 @@
+{
+ "broker": {
+  "instruments": {
+   "BTC_USD": {
+    "base": "BTC",
+    "instrument": "BTC_USD",
+    "min_notional": 0.0,
+    "min_qty": 1e-05,
+    "price_tick": 0.01,
+    "qty_tick": 1e-05,
+    "quote": "USD"
+   },
+   "ETH_USD": {
+    "base": "ETH",
+    "instrument": "ETH_USD",
+    "min_notional": 0.0,
+    "min_qty": 0.0001,
+    "price_tick": 0.01,
+    "qty_tick": 0.0001,
+    "quote": "USD"
+   },
+   "SOL_USD": {
+    "base": "SOL",
+    "instrument": "SOL_USD",
+    "min_notional": 0.0,
+    "min_qty": 0.001,
+    "price_tick": 0.01,
+    "qty_tick": 0.001,
+    "quote": "USD"
+   }
+  },
+  "last_close": {
+   "BTC_USD": 74782.63,
+   "ETH_USD": 2125.46,
+   "SOL_USD": 86.48
+  },
+  "last_t": {
+   "BTC_USD": 1794180600000,
+   "ETH_USD": 1794180600000,
+   "SOL_USD": 1794180600000
+  },
+  "maker_fee": 0.0025,
+  "orders": {
+   "P000001": {
+    "avg_price": null,
+    "client_oid": "ewBTC29902970E",
+    "created_ts": 0,
+    "fee": 0.0,
+    "filled_qty": 0.0,
+    "instrument": "BTC_USD",
+    "order_id": "P000001",
+    "price": 73900.0,
+    "qty": 0.005,
+    "side": "BUY",
+    "status": "CANCELED",
+    "type": "LIMIT",
+    "updated_ts": 1794178800000
+   },
+   "P000002": {
+    "avg_price": null,
+    "client_oid": "ewETH29902970E",
+    "created_ts": 0,
+    "fee": 0.0,
+    "filled_qty": 0.0,
+    "instrument": "ETH_USD",
+    "order_id": "P000002",
+    "price": 2090.0,
+    "qty": 0.075,
+    "side": "BUY",
+    "status": "ACTIVE",
+    "type": "LIMIT",
+    "updated_ts": 0
+   },
+   "P000003": {
+    "avg_price": null,
+    "client_oid": "ewSOL29902970E",
+    "created_ts": 0,
+    "fee": 0.0,
+    "filled_qty": 0.0,
+    "instrument": "SOL_USD",
+    "order_id": "P000003",
+    "price": 85.6,
+    "qty": 3.409,
+    "side": "BUY",
+    "status": "ACTIVE",
+    "type": "LIMIT",
+    "updated_ts": 0
+   }
+  },
+  "placed_after": {
+   "P000001": 0,
+   "P000002": 0,
+   "P000003": 0
+  },
+  "quote": "USD",
+  "reserve": {
+   "P000002": 157.53374999999997,
+   "P000003": 293.26945199999994
+  },
+  "reserved": {
+   "USD": 450.803202
+  },
+  "seq": 3,
+  "slippage": 0.0005,
+  "starting_balance": 1000.0,
+  "taker_fee": 0.005,
+  "total": {
+   "USD": 1000.0
+  },
+  "version": 1
+ },
+ "created_ts": 1794183162773,
+ "cursor": {
+  "BTC_USD": 1794180600000,
+  "ETH_USD": 1794180600000,
+  "SOL_USD": 1794180600000
+ },
+ "day": {
+  "date": "2026-11-09",
+  "start_equity": 1000.0
+ },
+ "equity_curve": [
+  {
+   "equity": 1000.0,
+   "ts": 1794180600000
+  },
+  {
+   "equity": 1000.0,
+   "ts": 1794182400000
+  }
+ ],
+ "halt_new": false,
+ "last_prices": {
+  "BTC_USD": 74782.63,
+  "ETH_USD": 2125.46,
+  "SOL_USD": 86.48
+ },
+ "last_step_ts": 1794182400000,
+ "log": [
+  "2026-11-08 22:50 UTC BTC: Limit-Kauf 0.005 @ 73900, Stop 72400, Risiko 7.50 USD",
+  "2026-11-08 22:50 UTC ETH: Limit-Kauf 0.075 @ 2090, Stop 1990, Risiko 7.50 USD",
+  "2026-11-08 22:50 UTC SOL: Limit-Kauf 3.409 @ 85.6, Stop 83.4, Risiko 7.50 USD",
+  "2026-11-08 23:30 UTC BTC: Entry storniert (Kurs hat Ziel erreicht ohne Ausfuehrung)"
+ ],
+ "mode": "paper",
+ "pnl_events": [],
+ "seen_signals": [
+  "BTC-1794178200000",
+  "ETH-1794178200000",
+  "SOL-1794178200000"
+ ],
+ "start_capital": 1000.0,
+ "trades": {
+  "BTC-1794178200000": {
+   "close_reason": "Kurs hat Ziel erreicht ohne Ausfuehrung",
+   "closed_ts": 1794180600000,
+   "coin": "BTC",
+   "cost": 0.0,
+   "created_ts": 1794178200000,
+   "entry_order": "P000001",
+   "entry_price": null,
+   "entry_qty": 0.0,
+   "fees": 0.0,
+   "id": "BTC-1794178200000",
+   "instrument": "BTC_USD",
+   "oid_n": {
+    "E": 1
+   },
+   "placed_ts": 1794178200000,
+   "qty": 0.005,
+   "realized": 0.0,
+   "remaining": 0.0,
+   "risk_usd": 7.5,
+   "signal": {
+    "cancel_above": 75600.0,
+    "coin": "BTC",
+    "created_ts": 1794178200000,
+    "entry": 73900.0,
+    "fib_hits": [
+     "Rally 61,8 % 69078.88"
+    ],
+    "id": "BTC-1794178200000",
+    "instrument": "BTC_USD",
+    "reason_de": "Manuelles Signal vom 08.11.2026 (Rally-R\u00fccksetzer + Gegenbewegung)",
+    "score": 0.0,
+    "stop": 72400.0,
+    "t1": 75600.0,
+    "t2": 76900.0,
+    "valid_until_ts": 1794351000000,
+    "wave1_high": 74716.56,
+    "wave_low": 73325.7
+   },
+   "state": "CANCELED",
+   "stop": 72400.0,
+   "stop_order": null,
+   "t1_done": false,
+   "t1_order": null,
+   "t2_order": null
+  },
+  "ETH-1794178200000": {
+   "coin": "ETH",
+   "cost": 0.0,
+   "created_ts": 1794178200000,
+   "entry_order": "P000002",
+   "entry_price": null,
+   "entry_qty": 0.0,
+   "fees": 0.0,
+   "id": "ETH-1794178200000",
+   "instrument": "ETH_USD",
+   "oid_n": {
+    "E": 1
+   },
+   "placed_ts": 1794178200000,
+   "qty": 0.075,
+   "realized": 0.0,
+   "remaining": 0.0,
+   "risk_usd": 7.5,
+   "signal": {
+    "cancel_above": 2200.0,
+    "coin": "ETH",
+    "created_ts": 1794178200000,
+    "entry": 2090.0,
+    "fib_hits": [
+     "Rally 61,8 % 2002.34"
+    ],
+    "id": "ETH-1794178200000",
+    "instrument": "ETH_USD",
+    "reason_de": "Manuelles Signal vom 08.11.2026 (Rally-R\u00fccksetzer + Gegenbewegung)",
+    "score": 0.0,
+    "stop": 1990.0,
+    "t1": 2200.0,
+    "t2": 2280.0,
+    "valid_until_ts": 1794351000000,
+    "wave1_high": 2137.22,
+    "wave_low": 2056.84
+   },
+   "state": "ENTRY_PENDING",
+   "stop": 1990.0,
+   "stop_order": null,
+   "t1_done": false,
+   "t1_order": null,
+   "t2_order": null
+  },
+  "SOL-1794178200000": {
+   "coin": "SOL",
+   "cost": 0.0,
+   "created_ts": 1794178200000,
+   "entry_order": "P000003",
+   "entry_price": null,
+   "entry_qty": 0.0,
+   "fees": 0.0,
+   "id": "SOL-1794178200000",
+   "instrument": "SOL_USD",
+   "oid_n": {
+    "E": 1
+   },
+   "placed_ts": 1794178200000,
+   "qty": 3.409,
+   "realized": 0.0,
+   "remaining": 0.0,
+   "risk_usd": 7.4997999999999605,
+   "signal": {
+    "cancel_above": 88.8,
+    "coin": "SOL",
+    "created_ts": 1794178200000,
+    "entry": 85.6,
+    "fib_hits": [
+     "Rally 61,8 % 84.87"
+    ],
+    "id": "SOL-1794178200000",
+    "instrument": "SOL_USD",
+    "reason_de": "Manuelles Signal vom 08.11.2026 (Rally-R\u00fccksetzer + Gegenbewegung)",
+    "score": 0.0,
+    "stop": 83.4,
+    "t1": 88.8,
+    "t2": 91.4,
+    "valid_until_ts": 1794351000000,
+    "wave1_high": 86.97,
+    "wave_low": 84.92
+   },
+   "state": "ENTRY_PENDING",
+   "stop": 83.4,
+   "stop_order": null,
+   "t1_done": false,
+   "t1_order": null,
+   "t2_order": null
+  }
+ },
+ "version": 1
+}

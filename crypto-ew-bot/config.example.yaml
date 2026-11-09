@@ -1,0 +1,31 @@
+# Kopiere diese Datei nach config.yaml und passe sie an. Hier stehen KEINE Geheimnisse (API-Keys gehoeren in .env).
+mode: paper               # paper = Uebungskonto (Standard). live nur mit den 3 Schutzschaltern, siehe README.
+live_enabled: false       # Schutzschalter 1 fuer echtes Geld (zusaetzlich: API-Keys in .env und --confirm-live)
+
+capital_usd: 1000         # Startkapital im Paper-Modus (USD)
+max_capital_usd: 1000     # Obergrenze: so viel Kapital darf der Bot hoechstens nutzen (auch live)
+risk_pct: 0.75            # Risiko pro Trade in % vom Kapital (Verlust, wenn der Stop greift)
+max_exposure_pct: 90      # alle Positionen zusammen hoechstens so viel % vom Kapital
+daily_loss_cap_pct: 2     # nach diesem Tagesverlust (UTC-Tag) keine neuen Einstiege mehr
+min_notional_usd: 10      # kleinster erlaubter Order-Wert, falls die Boerse keinen nennt
+
+coins: [BTC, ETH, SOL]    # nur diese drei sind erlaubt (USD-Paare, Spot, nur Long)
+
+fees:                     # ANNAHMEN - pruefe deine echten Gebuehren bei Crypto.com
+  maker: 0.0025           # Limit-Order (0,25 %)
+  taker: 0.005            # Market-Order (0,50 %)
+  slippage_pct: 0.0005    # Paper: Aufschlag bei Market-Orders (0,05 %)
+
+eur_per_usd_fallback: 0.8974   # nur falls der EUR-Kurs nicht abrufbar ist
+
+paths:
+  state: state/paper.json
+  live_state: state/live.json
+  kill: state/KILL
+  journal: state/journal_paper.csv
+  live_journal: state/journal_live.csv
+  out_dir: out
+  log: logs/ewbot.log
+
+# strategy:               # optional: Werte aus StrategyParams ueberschreiben
+#   some_param: 1.0

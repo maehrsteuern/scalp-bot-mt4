@@ -1,0 +1,23 @@
+[Unit]
+Description=ewbot - Elliott-Wave Swing-Bot (Crypto.com, Spot)
+After=network-online.target chrony.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ewbot
+WorkingDirectory=/home/ewbot/repo/crypto-ew-bot
+Environment=PYTHONUNBUFFERED=1
+# Paper-Modus (Standard). Fuer live: --mode live --confirm-live (und live_enabled: true in config.yaml)
+ExecStart=/home/ewbot/repo/crypto-ew-bot/.venv/bin/python -m ewbot run --mode paper
+Restart=always
+RestartSec=10
+# Sanftes Beenden: SIGTERM, der Bot beendet den laufenden Durchlauf
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/ewbot/repo/crypto-ew-bot
+
+[Install]
+WantedBy=multi-user.target

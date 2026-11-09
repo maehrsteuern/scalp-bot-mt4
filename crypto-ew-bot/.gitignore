@@ -1,0 +1,11 @@
+data/*.json
+state/
+out/
+*.env
+.env
+config.local.yaml
+__pycache__/
+config.yaml
+logs/
+data/hist/
+.pytest_cache/
