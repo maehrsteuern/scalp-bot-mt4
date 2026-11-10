@@ -712,28 +712,11 @@ class Bot:
 
 def make_broker(cfg: BotCfg, logger: Optional[logging.Logger] = None) -> "Broker":
     """PaperBroker for mode=paper, CcxtBroker for mode=live (module B)."""
-    from . import broker as broker_mod
+    from .broker import CcxtBroker, PaperBroker
 
-    cls = broker_mod.PaperBroker if cfg.exchange.mode == "paper" else broker_mod.CcxtBroker
-    return _construct(cls, cfg, logger)
-
-
-def _construct(cls: type, cfg: BotCfg, logger: Optional[logging.Logger]) -> Any:
-    """Instantiate a module-B class whose constructor takes the full BotCfg (or a sub-config)."""
-    import inspect
-
-    params = list(inspect.signature(cls.__init__).parameters.values())[1:]
-    kwargs: dict[str, Any] = {}
-    sub = {"cfg": cfg, "bot_cfg": cfg, "config": cfg, "exchange_cfg": cfg.exchange, "risk_cfg": cfg.risk,
-           "telegram_cfg": cfg.telegram, "markets": cfg.markets, "logger": logger, "log": logger}
-    for p in params:
-        if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-            continue
-        if p.name in sub:
-            kwargs[p.name] = sub[p.name]
-        elif p.default is p.empty:
-            raise TypeError(f"cannot build {cls.__name__}: unknown required argument {p.name!r}")
-    return cls(**kwargs)
+    if cfg.exchange.mode == "paper":
+        return PaperBroker(cfg)
+    return CcxtBroker(cfg)
 
 
 def build_bot(cfg: BotCfg, logger: Optional[logging.Logger] = None) -> Bot:
@@ -744,7 +727,7 @@ def build_bot(cfg: BotCfg, logger: Optional[logging.Logger] = None) -> Bot:
     from .strategy import ElliottStrategy
 
     logger = logger or setup_logging(cfg)
-    data = MarketData(cfg.exchange)
+    data = MarketData(cfg)
     broker = make_broker(cfg, logger)
     return Bot(cfg, data, broker, ElliottStrategy(cfg), RiskManager(cfg.risk), Telegram(cfg.telegram), logger)
 

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ewbot"
+version = "0.1.0"
+description = "Elliott-Wave trading bot for crypto and gold (PAXG) on Crypto.com Exchange"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["ccxt>=4.5", "numpy", "pyyaml", "requests"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+ewbot = "ewbot.__main__:main"
+
+[tool.setuptools]
+packages = ["ewbot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

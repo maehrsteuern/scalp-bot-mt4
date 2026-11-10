@@ -1,2 +1,18 @@
+# runtime data
+state/
+logs/
+data/
+reports/
+.env
+# MetaTrader binaries (legacy)
 *.ex4
 *.log
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/

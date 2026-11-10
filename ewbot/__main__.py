@@ -8,11 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-from .bot import iso, safe_symbol, timeframe_ms
+from .bot import HTF_WARMUP, iso, safe_symbol, timeframe_ms
 from .config import BotCfg, load_config
 
 DAY_MS = 86_400_000
-HTF_WARMUP_BARS = 70   # fetched before the backtest window so the HTF context is ready at the start
 
 
 def load_dotenv(path: str | os.PathLike[str] = ".env") -> int:
@@ -63,15 +62,16 @@ def _download(cfg: BotCfg, symbols: list[str], days: int) -> dict:
     """Fetch history for exec + HTF timeframes, including warm-up bars before the window."""
     from .data import MarketData
 
-    md = MarketData(cfg.exchange)
+    md = MarketData(cfg)
     now = int(time.time() * 1000)
+    htf_warm = max(HTF_WARMUP, int(cfg.strategy.ema_slow) + 50) + 10   # = bot HTF window, so EMAs are ready
     start = now - int(days) * DAY_MS
     out: dict = {}
     for sym in symbols:
         out[sym] = {}
         for tf in _timeframes(cfg):
             tf_ms = timeframe_ms(tf)
-            warm = (cfg.swing.lookback if tf == cfg.strategy.exec_timeframe else HTF_WARMUP_BARS) * tf_ms
+            warm = (cfg.swing.lookback if tf == cfg.strategy.exec_timeframe else htf_warm) * tf_ms
             print(f"  lade {sym} {tf} ...", flush=True)
             out[sym][tf] = md.fetch_history(sym, tf, start - warm, now)
             print(f"    {len(out[sym][tf])} Kerzen", flush=True)
@@ -190,9 +190,9 @@ def cmd_check(cfg: BotCfg, args: argparse.Namespace) -> int:
         ok &= present or not required
     print(f"Verbindung zu {cfg.exchange.id} ...")
     try:
-        import ccxt  # noqa: WPS433
+        from .data import MarketData
 
-        ex = getattr(ccxt, cfg.exchange.id)({"enableRateLimit": True})
+        ex = MarketData(cfg).exchange
         if cfg.exchange.sandbox:
             ex.set_sandbox_mode(True)
         markets = ex.load_markets()

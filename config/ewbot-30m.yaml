@@ -1,0 +1,90 @@
+# ewbot instance "ewbot-30m" – Elliott-Wave bot, execution timeframe 30m, Crypto.com Exchange.
+# Secrets (API keys, Telegram token) are NEVER stored here; they come from /opt/ewbot/.env.
+name: ewbot-30m                       # instance name (logs, Telegram, state)
+state_file: state/ewbot-30m.json      # persisted positions / last candles / pause flag
+log_file: logs/ewbot-30m.log          # rotating log file (5 MB x 5)
+log_level: INFO                   # DEBUG | INFO | WARNING | ERROR
+poll_seconds: 30                  # main loop interval in seconds
+
+markets:                          # traded markets (ccxt unified symbols)
+  - symbol: BTC/USD               # Bitcoin spot
+    allow_short: false            # spot cannot be shorted
+    min_notional: 1.0             # smallest order value in USD (exchange limit wins if higher)
+    weight: 1.0                   # risk multiplier for this market (1.0 = full risk_pct)
+  - symbol: ETH/USD               # Ether spot
+    allow_short: false            # spot cannot be shorted
+    min_notional: 1.0             # smallest order value in USD
+    weight: 1.0                   # risk multiplier
+  - symbol: SOL/USD               # Solana spot
+    allow_short: false            # spot cannot be shorted
+    min_notional: 1.0             # smallest order value in USD
+    weight: 1.0                   # risk multiplier
+  - symbol: PAXG/USD              # PAX Gold spot (1 token = 1 troy ounce of gold)
+    allow_short: false            # spot cannot be shorted
+    min_notional: 1.0             # smallest order value in USD
+    weight: 1.0                   # risk multiplier
+
+swing:                            # ZigZag swing detection
+  atr_period: 14                  # ATR length
+  atr_mult: 2.0                   # reversal needs atr_mult x ATR counter-move
+  min_bars: 3                     # minimum bars between two swings
+  lookback: 400                   # exec candles fed into the analysis
+
+elliott:                          # wave-count rules (fractions of the previous wave)
+  max_swings: 14                  # recent swings tried for wave labelling
+  w2_min: 0.382                   # wave 2 retracement band, lower bound
+  w2_max: 0.786                   # wave 2 retracement band, upper bound
+  w4_min: 0.236                   # wave 4 retracement band, lower bound
+  w4_max: 0.5                     # wave 4 retracement band, upper bound
+  w3_min_ext: 1.0                 # wave 3 must be at least this multiple of wave 1
+  wb_min: 0.382                   # wave B retracement band, lower bound
+  wb_max: 0.786                   # wave B retracement band, upper bound
+  min_score: 0.55                 # discard counts with a lower fib score
+
+strategy:                         # entry logic
+  exec_timeframe: 30m             # timeframe the bot trades on
+  htf_timeframes: [1h, 4h]        # higher timeframes used as direction filter
+  setups: [wave3, wave5, waveC]   # enabled setups
+  require_htf_agreement: true     # at least one HTF must agree, none may disagree
+  htf_fib_confluence_atr: 0.5     # entry zone within x HTF-ATR of an HTF fib level = bonus
+  min_signal_score: 0.6           # minimum signal quality 0..1
+  min_rr1: 1.0                    # minimum reward/risk to TP1
+  stop_buffer_atr: 0.25           # stop placed x ATR beyond the invalidation point
+  ema_fast: 50                    # fast EMA (HTF tie-breaker)
+  ema_slow: 200                   # slow EMA (HTF tie-breaker)
+  confirm_with_close: true        # wait for a candle closing in trade direction
+  max_signal_age_bars: 3          # ignore setups older than this many bars
+
+risk:                             # money management
+  risk_pct: 5.0                   # % of current equity risked per trade (compounding)
+  max_positions: 3                # max simultaneous positions (this instance)
+  max_positions_per_symbol: 1     # max positions per market
+  daily_loss_cap_pct: 15.0        # stop new entries for the UTC day after this loss
+  max_consecutive_losses: 4       # pause after this many losses in a row
+  pause_minutes_after_losses: 120 # length of that pause in minutes
+  tp1_fraction: 0.5               # part of the position closed at TP1
+  move_to_be_after_tp1: true      # stop to entry (break-even) after TP1
+  trail_after_tp1_atr: 0.0        # trailing stop distance in ATR after TP1 (0 = off)
+  max_hold_bars: 48                # time stop in exec bars (0 = off)
+  fee_pct: 0.075                  # taker fee per side in % (check your fee tier)
+  slippage_pct: 0.03              # simulated slippage in % (paper / backtest)
+
+exchange:                         # exchange connection
+  id: cryptocom                   # ccxt exchange id
+  mode: paper                     # paper = simulated money, live = real orders
+  sandbox: false                  # Crypto.com UAT test environment (needs separate keys)
+  api_key_env: CRYPTOCOM_API_KEY      # env var holding the API key
+  api_secret_env: CRYPTOCOM_API_SECRET # env var holding the API secret
+  paper_start_equity: 20.0        # start capital for paper mode (USD)
+  quote: USD                      # account currency
+  ohlcv_limit: 500                # candles fetched per request cycle
+  rate_limit: true                # respect exchange rate limits
+
+telegram:                         # notifications and remote control
+  enabled: false                  # true after TELEGRAM_* are set in .env
+  token_env: TELEGRAM_BOT_TOKEN   # env var holding the bot token
+  chat_id_env: TELEGRAM_CHAT_ID   # env var holding your chat id
+  poll_seconds: 5                 # how often commands are checked
+  notify_signals: true            # message on every signal
+  notify_fills: true              # message on entries and exits
+  daily_summary_utc: "21:00"      # daily summary time (UTC)

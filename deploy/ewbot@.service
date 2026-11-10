@@ -1,0 +1,24 @@
+# systemd template unit for ewbot. Instance name = config basename:
+#   systemctl enable --now ewbot@ewbot-15m   -> /opt/ewbot/config/ewbot-15m.yaml
+# Oracle Cloud Ubuntu images use the default user "ubuntu" (install_oracle.sh rewrites User= if
+# you install with EWBOT_USER=<other user>).
+[Unit]
+Description=ewbot Elliott-Wave trading bot (%i)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/ewbot
+EnvironmentFile=-/opt/ewbot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ewbot/.venv/bin/python -m ewbot run --config /opt/ewbot/config/%i.yaml
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

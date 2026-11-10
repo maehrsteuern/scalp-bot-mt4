@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from .bot import HTF_WARMUP, Bot, NullNotifier, _construct, iso, paper_copy, timeframe_ms
+from .bot import HTF_WARMUP, Bot, NullNotifier, iso, paper_copy, timeframe_ms
 from .config import BotCfg
 from .models import Candle, TradeRecord
 
@@ -169,7 +169,7 @@ def run_backtest(cfg: BotCfg, candles_by_tf: dict[str, dict[str, list[Candle]]],
         risk = RiskManager(bcfg.risk)
     if broker is None:
         from .broker import PaperBroker
-        broker = _construct(PaperBroker, bcfg, log)
+        broker = PaperBroker(bcfg, start_equity=float(start_equity))
 
     bot = Bot(bcfg, None, broker, strategy, risk, NullNotifier(), log, persist_enabled=False)
     exec_tf = bcfg.strategy.exec_timeframe
