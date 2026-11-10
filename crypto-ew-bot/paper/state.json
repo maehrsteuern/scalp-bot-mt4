@@ -30,14 +30,14 @@
    }
   },
   "last_close": {
-   "BTC_USD": 74354.33,
-   "ETH_USD": 2092.42,
-   "SOL_USD": 84.63
+   "BTC_USD": 73151.9,
+   "ETH_USD": 2022.43,
+   "SOL_USD": 82.24
   },
   "last_t": {
-   "BTC_USD": 1794310200000,
-   "ETH_USD": 1794310200000,
-   "SOL_USD": 1794310200000
+   "BTC_USD": 1794324600000,
+   "ETH_USD": 1794324600000,
+   "SOL_USD": 1794324600000
   },
   "maker_fee": 0.0025,
   "orders": {
@@ -127,9 +127,9 @@
     "price": 88.8,
     "qty": 1.704,
     "side": "SELL",
-    "status": "ACTIVE",
+    "status": "CANCELED",
     "type": "LIMIT",
-    "updated_ts": 1794207600000
+    "updated_ts": 1794315600000
    },
    "P000007": {
     "avg_price": null,
@@ -142,9 +142,24 @@
     "price": 91.4,
     "qty": 1.704,
     "side": "SELL",
-    "status": "ACTIVE",
+    "status": "CANCELED",
     "type": "LIMIT",
-    "updated_ts": 1794207600000
+    "updated_ts": 1794315600000
+   },
+   "P000008": {
+    "avg_price": 83.35,
+    "client_oid": "ewSOL29902970S",
+    "created_ts": 1794317400000,
+    "fee": 1.42070075,
+    "filled_qty": 3.409,
+    "instrument": "SOL_USD",
+    "order_id": "P000008",
+    "price": null,
+    "qty": 3.409,
+    "side": "SELL",
+    "status": "FILLED",
+    "type": "MARKET",
+    "updated_ts": 1794319200000
    }
   },
   "placed_after": {
@@ -154,37 +169,38 @@
    "P000004": 1794207600000,
    "P000005": 1794207600000,
    "P000006": 1794207600000,
-   "P000007": 1794207600000
+   "P000007": 1794207600000,
+   "P000008": 1794317400000
   },
   "quote": "USD",
   "reserve": {
    "P000004": 0.0375,
-   "P000005": 0.0375,
-   "P000006": 1.704,
-   "P000007": 1.704
+   "P000005": 0.0375
   },
   "reserved": {
    "ETH": 0.075,
-   "SOL": 3.408,
+   "SOL": 0.0,
    "USD": 0.0
   },
-  "seq": 7,
+  "seq": 8,
   "slippage": 0.0005,
   "starting_balance": 1000.0,
-  "stop_px": {},
+  "stop_px": {
+   "P000008": 83.4
+  },
   "taker_fee": 0.005,
   "total": {
    "ETH": 0.075,
-   "SOL": 3.409,
-   "USD": 550.318199
+   "SOL": 0.0,
+   "USD": 833.03764825
   },
   "version": 1
  },
  "created_ts": 1794183162773,
  "cursor": {
-  "BTC_USD": 1794310200000,
-  "ETH_USD": 1794310200000,
-  "SOL_USD": 1794310200000
+  "BTC_USD": 1794324600000,
+  "ETH_USD": 1794324600000,
+  "SOL_USD": 1794324600000
  },
  "day": {
   "date": "2026-11-10",
@@ -486,25 +502,66 @@
   {
    "equity": 995.7534,
    "ts": 1794312000000
+  },
+  {
+   "equity": 995.7086,
+   "ts": 1794313800000
+  },
+  {
+   "equity": 997.0057,
+   "ts": 1794315600000
+  },
+  {
+   "equity": 996.1519,
+   "ts": 1794317400000
+  },
+  {
+   "equity": 991.6229,
+   "ts": 1794319200000
+  },
+  {
+   "equity": 987.7064,
+   "ts": 1794321000000
+  },
+  {
+   "equity": 989.1209,
+   "ts": 1794322800000
+  },
+  {
+   "equity": 987.7131,
+   "ts": 1794324600000
+  },
+  {
+   "equity": 984.7199,
+   "ts": 1794326400000
   }
  ],
  "halt_new": false,
  "last_prices": {
-  "BTC_USD": 74354.33,
-  "ETH_USD": 2092.42,
-  "SOL_USD": 84.63
+  "BTC_USD": 73151.9,
+  "ETH_USD": 2022.43,
+  "SOL_USD": 82.24
  },
- "last_step_ts": 1794312000000,
+ "last_step_ts": 1794326400000,
  "log": [
   "2026-11-08 22:50 UTC BTC: Limit-Kauf 0.005 @ 73900, Stop 72400, Risiko 7.50 USD",
   "2026-11-08 22:50 UTC ETH: Limit-Kauf 0.075 @ 2090, Stop 1990, Risiko 7.50 USD",
   "2026-11-08 22:50 UTC SOL: Limit-Kauf 3.409 @ 85.6, Stop 83.4, Risiko 7.50 USD",
   "2026-11-08 23:30 UTC BTC: Entry storniert (Kurs hat Ziel erreicht ohne Ausfuehrung)",
   "2026-11-09 07:30 UTC ETH BUY 0.075 @ 2090 (Einstieg)",
-  "2026-11-09 07:30 UTC SOL BUY 3.409 @ 85.6 (Einstieg)"
+  "2026-11-09 07:30 UTC SOL BUY 3.409 @ 85.6 (Einstieg)",
+  "2026-11-10 14:00 UTC SOL: Stop ausgeloest - Markt-Verkauf 3.409",
+  "2026-11-10 14:30 UTC SOL SELL 3.409 @ 83.35 (Stop)",
+  "2026-11-10 14:30 UTC SOL geschlossen (Stop), Ergebnis -9.82 USD"
  ],
  "mode": "paper",
- "pnl_events": [],
+ "pnl_events": [
+  {
+   "pnl": -9.820476750000012,
+   "trade": "SOL-1794178200000",
+   "ts": 1794321000000
+  }
+ ],
  "seen_signals": [
   "BTC-1794178200000",
   "ETH-1794178200000",
@@ -620,6 +677,9 @@
    "t2_qty": 0.0375
   },
   "SOL-1794178200000": {
+   "close_reason": "Stop",
+   "close_why": "Stop",
+   "closed_ts": 1794321000000,
    "coin": "SOL",
    "cost": 292.539926,
    "created_ts": 1794178200000,
@@ -627,7 +687,7 @@
    "entry_order": "P000003",
    "entry_price": 85.6,
    "entry_qty": 3.409,
-   "fees": 0.729526,
+   "fees": 2.15022675,
    "fills": [
     {
      "fee": 0.729526,
@@ -637,20 +697,31 @@
      "qty": 3.409,
      "side": "BUY",
      "ts": 1794209400000
+    },
+    {
+     "fee": 1.42070075,
+     "note": "Stop",
+     "order_id": "P000008",
+     "price": 83.35,
+     "qty": 3.409,
+     "side": "SELL",
+     "ts": 1794321000000
     }
    ],
    "id": "SOL-1794178200000",
    "instrument": "SOL_USD",
    "oid_n": {
     "E": 1,
+    "S": 1,
     "T1": 1,
     "T2": 1
    },
    "opened_ts": 1794209400000,
    "placed_ts": 1794178200000,
    "qty": 3.409,
-   "realized": 0.0,
-   "remaining": 3.409,
+   "r_multiple": -1.309,
+   "realized": -9.820476750000012,
+   "remaining": 0.0,
    "risk_usd": 7.4997999999999605,
    "signal": {
     "cancel_above": 88.8,
@@ -671,13 +742,16 @@
     "wave1_high": 86.97,
     "wave_low": 84.92
    },
-   "state": "OPEN",
+   "state": "CLOSED",
    "stop": 83.4,
-   "stop_order": null,
+   "stop_level": 83.4,
+   "stop_oid": null,
+   "stop_order": "P000008",
+   "stop_pending": null,
    "t1_done": false,
-   "t1_order": "P000006",
+   "t1_order": null,
    "t1_qty": 1.704,
-   "t2_order": "P000007",
+   "t2_order": null,
    "t2_qty": 1.704
   }
  },
