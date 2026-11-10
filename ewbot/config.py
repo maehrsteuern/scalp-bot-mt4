@@ -68,6 +68,7 @@ class RiskCfg:
     max_hold_bars: int = 96                # time stop (bars of exec timeframe); 0 = off
     fee_pct: float = 0.075                 # taker fee per side, percent (Crypto.com default tier)
     slippage_pct: float = 0.03             # paper fill slippage, percent
+    min_stop_to_cost: float = 4.0          # stop distance (% of entry) must be >= x * round-trip cost (2*fee+2*slippage); 0 = off
 
 
 @dataclass

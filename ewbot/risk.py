@@ -37,6 +37,13 @@ class RiskManager:
         risk_per_unit = signal.risk_per_unit
         if risk_per_unit <= 0:
             return 0.0
+        if self.cfg.min_stop_to_cost > 0:
+            round_trip_pct = 2.0 * (self.cfg.fee_pct + self.cfg.slippage_pct)
+            stop_pct = risk_per_unit / signal.entry * 100.0
+            if stop_pct < self.cfg.min_stop_to_cost * round_trip_pct:
+                log.info("%s: stop %.3f%% too tight vs costs %.3f%% (need %.1fx)", signal.symbol,
+                         stop_pct, round_trip_pct, self.cfg.min_stop_to_cost)
+                return 0.0
         weight = market.weight if market is not None else 1.0
         risk_amount = equity * self.cfg.risk_pct / 100.0 * weight
         if risk_amount <= 0:
