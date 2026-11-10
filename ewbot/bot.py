@@ -35,6 +35,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 # --------------------------------------------------------------------------------------------- helpers
 
+HTF_WARMUP = 60   # minimum closed HTF candles before the backtester makes decisions
+
 _TF_UNITS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
 
 
@@ -205,6 +207,9 @@ class Bot:
         self.exec_tf = cfg.strategy.exec_timeframe
         self.exec_tf_ms = timeframe_ms(self.exec_tf)
         self.markets: dict[str, MarketCfg] = {m.symbol: m for m in cfg.markets}
+        # candles handed to the strategy (exec: swing lookback; HTF: enough for the slow EMA as well)
+        self.exec_window = max(int(cfg.swing.lookback), 1)
+        self.htf_window = max(self.exec_window, HTF_WARMUP, int(cfg.strategy.ema_slow) + 50)
 
         self.last_seen: dict[str, int] = {}
         self.paused: bool = False
@@ -317,6 +322,7 @@ class Bot:
         records = self.broker.on_candle(symbol, candle) or []
         for rec in records:
             self.log.info("%s closed by broker: %s pnl=%.4f", symbol, rec.reason, rec.pnl)
+        self._report_partial_fills(symbol)
 
         # 2. position management
         atr_now = last_atr(exec_candles[-(self.cfg.swing.atr_period * 5):], self.cfg.swing.atr_period)
@@ -333,14 +339,13 @@ class Bot:
         # 3. new entries
         if self.paused:
             return None
-        lookback = max(int(self.cfg.swing.lookback), 1)
-        window = exec_candles[-lookback:]
+        window = exec_candles[-self.exec_window:]
         htf_ctx = []
         for tf in self.cfg.strategy.htf_timeframes:
             htf_candles = (htf_candles_by_tf or {}).get(tf) or []
             if not htf_candles:
                 continue
-            htf_ctx.append(self.strategy.analyse_htf(tf, htf_candles[-lookback:]))
+            htf_ctx.append(self.strategy.analyse_htf(tf, htf_candles[-self.htf_window:]))
         sig = self.strategy.evaluate(symbol, window, htf_ctx)
         if sig is None:
             return None
@@ -367,6 +372,7 @@ class Bot:
         if self.cfg.telegram.notify_signals:
             self.notify(self._fmt("format_signal", self._signal_text(sig), sig))
         pos = self.broker.open(sig, qty, now_ms)
+        fills = [f for f in self._pop_fills() if f.reason == "entry"]
         if pos is None:
             self.log.warning("%s entry order failed / rejected", sig.symbol)
             return None
@@ -380,8 +386,8 @@ class Bot:
             pass
         self.log.info("OPENED %s %s qty=%.8g @ %.6g (id %s)", pos.symbol, pos.side.value, pos.qty, pos.entry, pos.id)
         if self.cfg.telegram.notify_fills:
-            entry_fill = Fill(ts=now_ms, symbol=pos.symbol, side=pos.side, qty=pos.qty, price=pos.entry,
-                              fee=pos.fees, reason="entry")
+            entry_fill = fills[-1] if fills else Fill(ts=now_ms, symbol=pos.symbol, side=pos.side, qty=pos.qty,
+                                                      price=pos.entry, fee=pos.fees, reason="entry")
             self.notify(self._fmt("format_fill", self._open_text(pos), entry_fill, pos))
         return pos
 
@@ -391,6 +397,8 @@ class Bot:
         if action == "stop":
             if value > 0 and value != pos.stop:
                 self.broker.update_stop(pos, value)
+                if abs(value - pos.entry) <= 1e-12 * max(1.0, abs(pos.entry)):
+                    pos.be_moved = True
                 self.log.info("%s stop -> %.6g", pos.id, value)
             return
         if action == "tp1" and pos.tp1_done:
@@ -398,12 +406,34 @@ class Bot:
         reason = {"tp1": "tp1", "close": "time"}.get(action, action)
         qty = min(value, pos.qty_open) if value > 0 else pos.qty_open
         fill = self.broker.close(pos, qty, candle.close, now_ms, reason)
+        self._pop_fills()  # reported right here / via the trade record
         if fill is not None:
             self.log.info("%s %s %.8g @ %.6g", pos.id, reason, fill.qty, fill.price)
             if action == "tp1":
                 pos.tp1_done = True
             if self.cfg.telegram.notify_fills and pos.qty_open > 0:
                 self.notify(self._fmt("format_fill", f"{reason}: {pos.symbol} {fill.qty:.8g} @ {fill.price:.6g}",
+                                      fill, pos))
+
+    def _pop_fills(self) -> list[Fill]:
+        fn = getattr(self.broker, "pop_fills", None)
+        if not callable(fn):
+            return []
+        try:
+            return list(fn() or [])
+        except Exception:
+            return []
+
+    def _report_partial_fills(self, symbol: str) -> None:
+        """Notify partial exits the broker made inside the candle (TP1); full exits go via trades."""
+        open_pos = {p.symbol: p for p in self._positions(symbol)}
+        for fill in self._pop_fills():
+            pos = open_pos.get(fill.symbol)
+            if fill.reason == "entry" or pos is None or pos.qty_open <= 0:
+                continue
+            self.log.info("%s partial %s %.8g @ %.6g", pos.id, fill.reason, fill.qty, fill.price)
+            if self.cfg.telegram.notify_fills:
+                self.notify(self._fmt("format_fill", f"{fill.reason}: {fill.symbol} {fill.qty:.8g} @ {fill.price:.6g}",
                                       fill, pos))
 
     def _report_new_trades(self) -> None:
@@ -416,9 +446,11 @@ class Bot:
             self.log.info("CLOSED %s %s %s exit=%.6g pnl=%+.4f (%s)", p.symbol, p.side.value, p.setup.value,
                           tr.exit_price, tr.pnl, tr.reason)
             if self.cfg.telegram.notify_fills:
-                self.notify(f"{'GEWINN' if tr.pnl >= 0 else 'VERLUST'}: <b>{p.symbol}</b> {p.side.value} {p.setup.value} "
-                            f"geschlossen ({tr.reason})\nExit {tr.exit_price:.6g} | PnL {tr.pnl:+.2f} "
-                            f"{self.cfg.exchange.quote}\nEquity {self._equity():.2f}")
+                fallback = (f"{'GEWINN' if tr.pnl >= 0 else 'VERLUST'}: <b>{p.symbol}</b> {p.side.value} "
+                            f"{p.setup.value} geschlossen ({tr.reason})\nExit {tr.exit_price:.6g} | "
+                            f"PnL {tr.pnl:+.2f} {self.cfg.exchange.quote}")
+                text = self._fmt("format_trade", fallback, tr)
+                self.notify(f"{text}\nEquity {self._equity():.2f} {self.cfg.exchange.quote}")
 
     def _signal_text(self, s: Signal) -> str:
         return (f"<b>Signal {s.symbol} {s.side.value.upper()}</b> ({s.setup.value}, {s.timeframe})\n"
@@ -610,7 +642,7 @@ class Bot:
             "trades": [to_tr(t) for t in self._safe_trades()[-200:]],
             "last_signal": dict(self.last_signal),
         }
-        for attr in ("to_state", "state_dict", "to_dict"):
+        for attr in ("snapshot", "to_state", "to_dict"):
             fn = getattr(self.broker, attr, None)
             if callable(fn):
                 try:
@@ -643,7 +675,7 @@ class Bot:
         trades = [self._state["trade_from_dict"](d) for d in data.get("trades") or []]
         restored = False
         if data.get("broker") is not None:
-            for attr in ("from_state", "load_state_dict", "restore_state", "from_dict"):
+            for attr in ("restore_snapshot", "from_state", "from_dict"):
                 fn = getattr(self.broker, attr, None)
                 if callable(fn):
                     try:
@@ -653,7 +685,7 @@ class Bot:
                         self.log.warning("broker.%s failed: %s", attr, exc)
                     break
         if not restored:
-            for attr in ("restore", "restore_positions", "load_positions", "set_positions"):
+            for attr in ("load_positions", "restore_positions", "restore"):
                 fn = getattr(self.broker, attr, None)
                 if callable(fn):
                     try:
