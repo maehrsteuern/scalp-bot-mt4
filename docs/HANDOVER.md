@@ -18,8 +18,14 @@
 - Zu wenig Trades für einen Beleg. Parameter-Sweep: lockerere Schwellen = mehr Trades, aber Verlust. Standard (2,0 × ATR, 3 Kerzen) bleibt.
 - Realität Spot + 20 USD: Position ist auf freies Guthaben gedeckelt, effektives Risiko je Trade 0,1-1 %, nicht 5 %. Mehr Risiko ginge nur über Perps (vorbereitet, ungetestet, nicht empfohlen).
 
+## Deployment (erledigt 11.11.2026)
+- Oracle Cloud Frankfurt, Always-Free VM.Standard.A1.Flex (1 OCPU, 6 GB, Ubuntu 24.04 arm64), Nutzer `ubuntu`, Code in `/opt/ewbot`, Dienste `ewbot@ewbot-15m` und `ewbot@ewbot-30m` laufen (paper, 20 USD).
+- Zugang von Loris per Oracle Cloud Shell: `ssh -i ~/ssh-key-*.key ubuntu@<Public-IP>` (IP, Token, Chat-ID bewusst nicht im Repo).
+- Telegram-Bot `CryptoComWaveBot` nur am 15m-Bot aktiv (`telegram.enabled: true`), `/status` getestet und beantwortet. 30m-Bot ohne Telegram, weil ein Token nur von einem Prozess abgefragt werden darf.
+- Code-Update auf dem Server: `sudo bash /opt/ewbot/deploy/update.sh`.
+
 ## Offen / Nächste Schritte
-1. Auf dem Oracle-VPS installieren (README Abschnitt 4), 15m-Bot im Paper-Modus 1-2 Wochen laufen lassen, Log und `status` prüfen.
+1. 15m-Bot im Paper-Modus 1-2 Wochen laufen lassen, Signale per Telegram und `status` prüfen.
 2. Gebührenstufe im Crypto.com Exchange prüfen; falls > 0,075 % je Seite `fee_pct` anpassen.
 3. Crypto.com-API-Key (Trade, kein Withdrawal, IP-Whitelist VPS) und Telegram in `/opt/ewbot/.env` eintragen.
 4. Erst dann **einen** Bot auf `mode: live` schalten.
