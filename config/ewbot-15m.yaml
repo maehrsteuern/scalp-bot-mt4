@@ -75,7 +75,7 @@ exchange:                         # exchange connection
   sandbox: false                  # Crypto.com UAT test environment (needs separate keys)
   api_key_env: CRYPTOCOM_API_KEY      # env var holding the API key
   api_secret_env: CRYPTOCOM_API_SECRET # env var holding the API secret
-  paper_start_equity: 20.0        # start capital for paper mode (USD)
+  paper_start_equity: 2000.0       # start capital for paper mode (USD)
   quote: USD                      # account currency
   ohlcv_limit: 500                # candles fetched per request cycle
   rate_limit: true                # respect exchange rate limits
