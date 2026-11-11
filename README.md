@@ -83,7 +83,8 @@ Deshalb ist `allow_short: false` eingestellt. Fallende Märkte werden ausgesesse
 
 | Regel | Standardwert | Bedeutung |
 |---|---|---|
-| Risiko pro Trade | 5 % | Wird der Stop-Loss getroffen, verliert das Konto etwa 5 % (inkl. Gebühren). Bei 20 USD also rund 1 USD. |
+| Risiko pro Trade | 5 % | Rechnerische Obergrenze: Wird der Stop-Loss getroffen, verliert das Konto höchstens etwa 5 % (inkl. Gebühren). **Auf Spot ohne Hebel wird das selten erreicht:** Die Position ist auf das freie Guthaben begrenzt, bei engen Elliott-Stops liegt das tatsächliche Risiko je Trade meist nur bei 0,1 bis 1 % des Kontos. |
+| Mindestabstand Stop | 4 × Kosten | Ein Signal, dessen Stop näher am Einstieg liegt als das 4-Fache der Hin- und Rückweg-Kosten (Gebühren + Schlupf, ca. 0,2 %), wird ausgelassen. Sonst fressen die Gebühren den Trade. (`min_stop_to_cost`) |
 | Teilgewinn | 50 % bei TP1 | Am ersten Ziel wird die Hälfte verkauft. |
 | Break-even | an | Nach TP1 wird der Stop auf den Einstiegskurs gezogen – der Rest kann dann (fast) nichts mehr verlieren. |
 | Tagesverlustgrenze | 15 % | Ist das Konto an einem Tag (UTC) 15 % im Minus, macht der Bot bis Mitternacht UTC keine neuen Trades. |
@@ -317,7 +318,25 @@ Start gemeldet (`check` zeigt ihn ebenfalls).
 
 ---
 
-## 10. Offene Punkte und Annahmen
+## 10. Backtest-Ergebnis (Stand 11.11.2026)
+
+120 Tage echte Crypto.com-Kurse (13.07. bis 10.11.2026), vier Märkte, 20 USD Start, Gebühren 0,075 % je
+Seite, Schlupf 0,03 %. Berichte liegen in `docs/backtests/`.
+
+| Bot | Trades | Trefferquote | Profit-Faktor | Ergebnis | Max. Rückgang |
+|---|---|---|---|---|---|
+| ewbot-15m | 12 | 66,7 % | 3,04 | +9,0 % | 5,2 % |
+| ewbot-30m | 7 | 42,9 % | 0,63 | -2,1 % | 5,5 % |
+
+Einordnung: 12 bzw. 7 Trades in vier Monaten sind zu wenig, um einen Vorteil zu belegen. Ein Parameter-Test
+(Umkehrschwelle 1,5 / 2,0 / 2,5 × ATR, Signalalter 3 / 6 / 10 Kerzen) zeigte: Lockerere Einstellungen bringen
+mehr Trades, aber Verluste; die Standardwerte (2,0 × ATR, 3 Kerzen) waren auf 15 Minuten in allen Varianten
+positiv, auf 30 Minuten meist negativ. Empfehlung: zuerst den 15-Minuten-Bot im Papierhandel laufen lassen,
+den 30-Minuten-Bot nur beobachten.
+
+---
+
+## 11. Offene Punkte und Annahmen
 
 - **Kontowährung USD.** Die Märkte heißen `BTC/USD` usw. Crypto.com führt Paare teils gegen USD, teils
   gegen USDT/USDC. `check` zeigt, ob alle Märkte gefunden werden. Liegt Ihr Guthaben z. B. in USDT, müssen
@@ -333,12 +352,15 @@ Start gemeldet (`check` zeigt ihn ebenfalls).
   erfahrener Analyst könnte anders zählen.
 - **Keine Leerverkäufe** auf Spot. Perpetual-Futures (`BTC/USD:USD`, `allow_short: true`) sind technisch
   vorbereitet, aber nicht getestet und nicht empfohlen.
+- **Gebührenstufe prüfen.** Der Bot rechnet mit 0,075 % je Seite (Crypto.com Exchange, Einstiegsstufe laut
+  Drittquellen). Die eigene Stufe steht im Exchange unter „Fees“. Ist sie höher, `fee_pct` anpassen; bei
+  0,5 % je Seite ist die Strategie nicht tragfähig.
 - **Backtest-Grenzen:** Innerhalb einer Kerze wird angenommen, dass bei gleichzeitigem Stop und Ziel der
   Stop zuerst getroffen wurde (vorsichtig). Echte Ausführungen können abweichen.
 
 ---
 
-## 11. Risikohinweise
+## 12. Risikohinweise
 
 - Der Handel mit Kryptowährungen ist hochriskant. Kurse können innerhalb von Minuten stark fallen.
 - **Totalverlust ist möglich.** Das gesamte eingesetzte Kapital kann verloren gehen.
