@@ -104,3 +104,14 @@ def test_manage_short_mirror():
     pos = make_pos(side=Side.SHORT)
     acts = rm.manage(pos, Candle(T0 + 15 * MIN, 99, 99.5, 95.5, 96, 1), atr=1.0)
     assert acts == [("tp1", 0.5), ("stop", 100.0)]
+
+
+def test_set_day_start_ignores_unknown_or_zero_equity():
+    rm = RiskManager(RiskCfg(daily_loss_cap_pct=15.0))
+    rm.set_day_start(20.0, T0)
+    rm.set_day_start(0.0, T0 + DAY)
+    rm.set_day_start(None, T0 + DAY)
+    rm.set_day_start(float("nan"), T0 + DAY)
+    assert rm.day_start_equity == pytest.approx(20.0) and rm.day_start_ts == T0
+    ok, why = rm.can_open(T0 + 60 * MIN, 16.9, [], [], "BTC/USD")
+    assert not ok and "daily loss cap" in why

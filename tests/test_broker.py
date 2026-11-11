@@ -1,3 +1,4 @@
+import ccxt
 import pytest
 
 from ewbot.broker import CcxtBroker, PaperBroker
@@ -133,7 +134,7 @@ class FakeExchange:
         return f"{price:.2f}"
 
     def fetch_balance(self):
-        return {"total": {"USD": self.quote_free, "BTC": 0.0},
+        return {"total": {"USD": self.quote_free, "BTC": 1.0},
                 "free": {"USD": self.quote_free, "BTC": 1.0}}
 
     def create_order(self, symbol, type, side, amount, price=None, params=None):
@@ -173,7 +174,8 @@ def test_ccxt_market_buy_and_reduce_only_exit():
 
     fill = b.close(pos, pos.qty_open, 105.0, 1, "manual")
     assert fill is not None and fill.price == 105.0
-    assert ex.orders[-1]["side"] == "sell" and ex.orders[-1]["params"] == {}
+    assert ex.orders[-1]["side"] == "sell" and "reduceOnly" not in ex.orders[-1]["params"]
+    assert ex.orders[-1]["params"]["clientOrderId"].startswith("ewb")
     assert b.trades()[0].pnl == pytest.approx(0.12345 * 5 - 0.075 / 100 * (0.12345 * 100 + 0.12345 * 105))
 
     # perp exit uses reduceOnly
@@ -181,7 +183,7 @@ def test_ccxt_market_buy_and_reduce_only_exit():
     perp = b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=2)
     assert perp.tags.get("stop_order_id")
     b.close(perp, 0.2, 105.0, 3, "manual")
-    assert ex.orders[-1]["params"] == {"reduceOnly": True}
+    assert ex.orders[-1]["params"]["reduceOnly"] is True
     assert perp.tags.get("stop_order_id") is None and ex.cancelled
 
 
@@ -205,7 +207,7 @@ def test_ccxt_exchange_errors_never_raise():
 
     b = CcxtBroker(live_cfg(), exchange=Broken())
     assert b.open(make_signal(symbol="BTC/USD:USD"), 0.5, ts=0) is None
-    assert b.equity() == 0.0 and b.cash() == 0.0
+    assert b.equity() is None and b.cash() == 0.0      # never fetched -> unknown, not 0
 
 
 def test_ccxt_on_candle_sends_market_exit_on_stop():
@@ -214,5 +216,152 @@ def test_ccxt_on_candle_sends_market_exit_on_stop():
     pos = b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0)
     recs = b.on_candle("BTC/USD:USD", candle(1, 99, 99.5, 97.5, 98))
     assert len(recs) == 1 and recs[0].reason == "stop"
-    assert ex.orders[-1]["side"] == "sell" and ex.orders[-1]["params"] == {"reduceOnly": True}
+    assert ex.orders[-1]["side"] == "sell" and ex.orders[-1]["params"]["reduceOnly"] is True
     assert b.positions() == []
+
+
+# ---------------------------------------------------------------- audit fixes
+TFMS = 15 * 60_000
+
+
+def test_paper_bar_after_entry_is_checked_and_exit_stamped_with_close_time():
+    """Entry on bar N (opened at N's close == N+1's open ts); a stop inside bar N+1 must execute."""
+    b = PaperBroker(cfg(fee=0.0))
+    n_ts = 1_000 * TFMS
+    pos = b.open(make_signal(ts=n_ts), 1.0, ts=n_ts + TFMS)          # backtest: now = close time of N
+    assert pos.tags["signal_ts"] == str(n_ts)
+    assert b.on_candle(pos.symbol, candle(n_ts, 100, 120, 80, 100)) == []   # signal candle itself skipped
+    recs = b.on_candle(pos.symbol, candle(n_ts + TFMS, 100, 100.5, 97.0, 99))
+    assert len(recs) == 1 and recs[0].reason == "stop"
+    assert recs[0].exit_price == pytest.approx(98.0)
+    assert recs[0].closed_ts == n_ts + 2 * TFMS                        # close time of bar N+1
+    fills = b.pop_fills()
+    assert fills[-1].reason == "stop" and fills[-1].ts == n_ts + 2 * TFMS
+
+
+def test_paper_bar_after_entry_checked_with_live_wallclock_open_ts():
+    b = PaperBroker(cfg(fee=0.0))
+    n_ts = 1_000 * TFMS
+    pos = b.open(make_signal(ts=n_ts), 1.0, ts=n_ts + TFMS + 7_000)    # live: wall clock after N's close
+    recs = b.on_candle(pos.symbol, candle(n_ts + TFMS, 100.5, 106, 100.5, 104))
+    assert recs == [] and pos.tp1_done                                  # TP1 partial executed on N+1
+
+
+class FillExchange(FakeExchange):
+    """create_order result is configurable; fetch_order looks up stored orders by id / client id."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.fail_stop = False
+        self.create_result = None          # callable(order) -> dict returned by create_order
+        self.raise_on_create = None        # exception raised by create_order (after recording it)
+        self.stored = {}                   # id or client id -> order dict for fetch_order
+        self.balance_base_total = 1.0
+
+    def create_order(self, symbol, type, side, amount, price=None, params=None):
+        params = params or {}
+        oid = str(len(self.orders) + 1)
+        rec = {"id": oid, "symbol": symbol, "type": type, "side": side, "amount": amount,
+               "price": price, "params": params}
+        self.orders.append(rec)
+        if "stopLossPrice" in params:
+            return {"id": oid, "status": "open", "filled": 0.0}
+        if self.raise_on_create is not None:
+            raise self.raise_on_create
+        if self.create_result is not None:
+            return self.create_result(rec)
+        return {"id": oid, "average": 100.0 if side == "buy" else 105.0, "filled": amount, "status": "closed"}
+
+    def fetch_order(self, oid, symbol=None, params=None):
+        if oid in self.stored:
+            return self.stored[oid]
+        raise ccxt.OrderNotFound(oid)
+
+    def fetch_balance(self):
+        return {"total": {"USD": self.quote_free, "BTC": self.balance_base_total},
+                "free": {"USD": self.quote_free, "BTC": self.balance_base_total}}
+
+
+def test_ccxt_zero_fill_is_not_booked():
+    ex = FillExchange()
+    ex.create_result = lambda rec: {"id": rec["id"], "filled": 0.0, "average": None, "status": "canceled"}
+    b = CcxtBroker(live_cfg(), exchange=ex)
+    assert b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0) is None
+    assert b.positions() == [] and b.pop_fills() == []
+
+    # filled unknown -> fetched once; still 0 / open -> not booked
+    ex.create_result = lambda rec: {"id": rec["id"]}
+    ex.stored = {str(len(ex.orders) + 1): {"id": "x", "filled": 0.0, "status": "open"}}
+    assert b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0) is None
+    assert b.positions() == []
+
+
+def test_ccxt_partial_fill_books_only_filled_qty():
+    ex = FillExchange()
+    ex.create_result = lambda rec: {"id": rec["id"], "filled": 0.1, "average": 100.0, "status": "closed"}
+    b = CcxtBroker(live_cfg(), exchange=ex)
+    pos = b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0)
+    assert pos is not None and pos.qty == pytest.approx(0.1)
+
+
+def test_ccxt_network_error_on_create_is_reconciled_by_client_id():
+    ex = FillExchange()
+    ex.raise_on_create = ccxt.RequestTimeout("timeout")
+    b = CcxtBroker(live_cfg(), exchange=ex)
+    # order not found anywhere -> nothing booked
+    assert b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0) is None
+    assert b.positions() == []
+
+    # the order did reach the exchange: fetch_order by client id finds the fill
+    orig = ex.create_order
+
+    def create_and_store(symbol, type, side, amount, price=None, params=None):
+        cid = (params or {}).get("clientOrderId")
+        if cid and "stopLossPrice" not in (params or {}):
+            ex.stored[cid] = {"id": "srv-9", "clientOrderId": cid, "filled": amount, "average": 100.5,
+                              "status": "closed"}
+        return orig(symbol, type, side, amount, price, params)
+
+    ex.create_order = create_and_store
+    pos = b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0)
+    assert pos is not None and pos.qty == pytest.approx(0.2) and pos.entry == pytest.approx(100.5)
+    assert pos.tags["entry_order_id"] == "srv-9"
+
+
+def test_ccxt_close_books_already_triggered_exchange_stop():
+    ex = FillExchange()
+    b = CcxtBroker(live_cfg(), exchange=ex)
+    pos = b.open(make_signal(symbol="BTC/USD:USD"), 0.2, ts=0)
+    stop_id = pos.tags["stop_order_id"]
+    ex.stored[stop_id] = {"id": stop_id, "status": "closed", "filled": 0.2, "average": 97.9,
+                          "fee": {"cost": 0.01, "currency": "USD"}}
+    n_orders = len(ex.orders)
+    fill = b.close(pos, pos.qty_open, 101.0, 5, "time")
+    assert fill is not None and fill.reason == "stop" and fill.price == pytest.approx(97.9)
+    assert fill.fee == pytest.approx(0.01)
+    assert len(ex.orders) == n_orders                        # no second exit order was sent
+    assert b.positions() == [] and b.trades()[0].reason == "stop"
+
+
+def test_ccxt_close_spot_with_zero_base_balance_finishes_at_stop():
+    ex = FillExchange()
+    b = CcxtBroker(live_cfg(), exchange=ex)
+    pos = b.open(make_signal(symbol="BTC/USD"), 0.1, ts=0)
+    ex.balance_base_total = 0.0                               # stop executed / sold elsewhere
+    n_orders = len(ex.orders)
+    fill = b.close(pos, pos.qty_open, 101.0, 5, "time")
+    assert fill is not None and fill.price == pytest.approx(98.0) and fill.reason == "stop"
+    assert all(o["side"] != "sell" or "stopLossPrice" in o["params"] for o in ex.orders[n_orders:])
+    assert b.positions() == [] and len(b.trades()) == 1
+
+
+def test_ccxt_equity_keeps_last_known_value_after_first_success():
+    ex = FillExchange()
+    b = CcxtBroker(live_cfg(), exchange=ex)
+    assert b.equity() == pytest.approx(100.0)
+
+    def down():
+        raise ccxt.NetworkError("down")
+
+    ex.fetch_balance = down
+    assert b.equity() == pytest.approx(100.0)

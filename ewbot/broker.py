@@ -7,20 +7,24 @@ Shared accounting (both brokers):
     pnl_pct = pnl / equity at open * 100, exit_price = qty-weighted average exit price,
     reason = reason of the final exit fill.
   * Fills (entries and exits, incl. TP1 partials) are queued; the caller drains them via pop_fills().
-  * Tags: "equity_at_open", "initial_stop" (and "stop_order_id" for live exchange stops).
+  * Tags: "equity_at_open", "initial_stop", "signal_ts" (open ts of the signal candle; on_candle only
+    checks candles after it, so the very next bar is checked) and "stop_order_id" for live exchange stops.
+  * Exits triggered inside a candle (on_candle) are stamped with the candle CLOSE time.
 """
 from __future__ import annotations
 
 import dataclasses
 import logging
 import os
+import time
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any
 
 import ccxt
 
 from .config import BotCfg, MarketCfg, RiskCfg, env_secret
-from .data import trust_proxy_env
+from .data import timeframe_ms, trust_proxy_env
 from .models import Candle, Fill, Position, Side, Signal, TradeRecord
 from .state import position_from_dict, position_to_dict, trade_from_dict, trade_to_dict
 
@@ -45,7 +49,7 @@ class Broker(ABC):
 
     # ------------------------------------------------------------- interface
     @abstractmethod
-    def equity(self) -> float: ...
+    def equity(self) -> float | None: ...
 
     @abstractmethod
     def cash(self) -> float: ...
@@ -129,7 +133,7 @@ class Broker(ABC):
             setup=signal.setup, timeframe=signal.timeframe, qty_open=qty,
             realized_pnl=-fee, fees=fee,
             tags={"equity_at_open": repr(float(equity_at_open)), "initial_stop": repr(float(signal.stop)),
-                  "score": f"{signal.score:.3f}"},
+                  "score": f"{signal.score:.3f}", "signal_ts": str(int(signal.ts))},
         )
         self._positions.append(pos)
         self._pending_fills.append(Fill(ts, signal.symbol, signal.side, qty, price, fee, "entry"))
@@ -172,9 +176,24 @@ class Broker(ABC):
         log.info("closed %s %s pnl=%.4f (%s)", p.id, p.side.value, p.realized_pnl, reason)
         return rec
 
+    @staticmethod
+    def _candle_close_ts(p: Position, c: Candle) -> int:
+        """Close time of candle `c` (= c.ts + timeframe of the position), c.ts if unknown."""
+        try:
+            return int(c.ts + timeframe_ms(p.timeframe))
+        except Exception:
+            return int(c.ts)
+
     def _process_position(self, p: Position, c: Candle) -> None:
-        if c.ts <= p.opened_ts or p.qty_open <= _EPS:
+        if p.qty_open <= _EPS:
             return
+        try:
+            signal_ts = int(p.tags["signal_ts"])
+        except (KeyError, TypeError, ValueError):   # legacy positions without the tag
+            signal_ts = p.opened_ts
+        if c.ts <= signal_ts:          # the signal candle itself (or older): not tradable after entry
+            return
+        ts = self._candle_close_ts(p, c)
         long = p.side is Side.LONG
 
         def stop_hit() -> bool:
@@ -186,25 +205,25 @@ class Broker(ABC):
         # 1) Pessimistic: if the stop was touched at all, assume it filled before any target.
         if stop_hit():
             price = min(p.stop, c.open) if long else max(p.stop, c.open)   # gap through the stop
-            self.close(p, p.qty_open, price, c.ts, "stop")
+            self.close(p, p.qty_open, price, ts, "stop")
             return
         # 2) TP1 partial, then break-even.
         frac = self.risk.tp1_fraction
         if not p.tp1_done and frac > 0 and hit(p.tp1):
             q = p.qty * frac
             if q >= p.qty_open * (1 - 1e-9):
-                self.close(p, p.qty_open, p.tp1, c.ts, "tp1")
+                self.close(p, p.qty_open, p.tp1, ts, "tp1")
                 return
-            if self.close(p, q, p.tp1, c.ts, "tp1") is None:
+            if self.close(p, q, p.tp1, ts, "tp1") is None:
                 return
             if self.risk.move_to_be_after_tp1 and (p.entry - p.stop) * p.side.sign > _EPS:
                 self.update_stop(p, p.entry)
             if p.qty_open > _EPS and stop_hit():          # pessimistic: BE stop also hit this candle
-                self.close(p, p.qty_open, p.stop, c.ts, "stop")
+                self.close(p, p.qty_open, p.stop, ts, "stop")
                 return
         # 3) TP2 closes the rest.
         if p.qty_open > _EPS and hit(p.tp2):
-            self.close(p, p.qty_open, p.tp2, c.ts, "tp2")
+            self.close(p, p.qty_open, p.tp2, ts, "tp2")
 
 
 class PaperBroker(Broker):
@@ -290,12 +309,18 @@ class CcxtBroker(Broker):
     Spot: long only (market buy / market sell). Perps (symbol contains ':'): both sides, exits use
     reduceOnly. Equity = total quote balance + value of held spot positions + unrealised perp pnl.
     Every exchange call is wrapped: failures are logged and None / [] / last known value returned.
+    equity() returns None until a balance has been fetched successfully at least once.
+    Orders carry a client order id; after a network error on create_order the order is looked up
+    (fetch_order / open+closed orders / my trades) and booked only if it actually filled.
     """
+
+    _DONE = ("closed", "filled")
+    _TERMINAL_PARTIAL = ("canceled", "cancelled", "expired", "rejected")
 
     def __init__(self, cfg: BotCfg, exchange: Any = None, place_exchange_stops: bool = True) -> None:
         super().__init__(cfg)
         self.place_exchange_stops = place_exchange_stops
-        self._last_equity = 0.0
+        self._last_equity: float | None = None
         self._last_cash = 0.0
         if exchange is None:
             ex = cfg.exchange
@@ -370,21 +395,137 @@ class CcxtBroker(Broker):
             log.exception("fetch_balance failed")
             return None
 
-    def _order_fill(self, order: Any, symbol: str, amount: float, ref: float) -> tuple[float, float]:
-        """(filled qty, average price) from a ccxt order, fetching it once if needed."""
-        order = order or {}
-        avg = order.get("average") or None
-        filled = order.get("filled") or None
-        if (avg is None or filled is None) and order.get("id"):
+    def _order_fill(self, order: Any, symbol: str, ref: float) -> tuple[float, float, dict] | None:
+        """(filled qty, average price, order) of what the exchange ACTUALLY filled, or None.
+
+        The order is fetched once if its fill quantity / average / final status is not known yet.
+        Nothing is booked when the fill is unknown or zero, or the order is still working.
+        Orders that ended cancelled/expired after a partial fill are booked with the filled part.
+        """
+        order = dict(order or {})
+        oid = order.get("id")
+        if oid and (order.get("filled") is None or not order.get("average")
+                    or order.get("status") in (None, "open")):
             try:
-                fetched = self.exchange.fetch_order(order["id"], symbol)
-                avg = avg or fetched.get("average") or fetched.get("price")
-                filled = filled or fetched.get("filled")
-            except Exception:
-                log.debug("fetch_order %s failed", order.get("id"))
-        avg = float(avg or order.get("price") or ref)
-        filled = float(filled or amount)
-        return filled, avg
+                fetched = self.exchange.fetch_order(oid, symbol) or {}
+                order.update({k: v for k, v in fetched.items() if v is not None})
+            except Exception as exc:
+                log.warning("fetch_order %s (%s) failed: %s", oid, symbol, exc)
+        filled, status = order.get("filled"), order.get("status")
+        if filled is None:
+            log.error("order %s %s: filled quantity unknown (status %s) - not booked", oid, symbol, status)
+            return None
+        filled = float(filled)
+        if filled <= _EPS:
+            log.error("order %s %s: nothing filled (status %s) - not booked", oid, symbol, status)
+            return None
+        if status is not None and status not in self._DONE:
+            if status in self._TERMINAL_PARTIAL:
+                log.warning("order %s %s ended %s after a partial fill of %.8f - booking the filled part",
+                            oid, symbol, status, filled)
+            else:
+                log.error("order %s %s still %s (filled %.8f) - not booked", oid, symbol, status, filled)
+                return None
+        avg = float(order.get("average") or order.get("price") or ref)
+        return filled, avg, order
+
+    def _order_fee(self, order: dict, symbol: str, price: float, qty: float) -> float:
+        """Fee in quote currency: the exchange-reported fee when usable, else fee_pct."""
+        fee = (order or {}).get("fee") or {}
+        try:
+            cost, cur = fee.get("cost"), fee.get("currency")
+            if cost is not None and cur:
+                quote = symbol.split("/")[1].split(":")[0] if "/" in symbol else self._quote()
+                if cur == quote:
+                    return abs(float(cost))
+                if cur == self._base(symbol):
+                    return abs(float(cost)) * price
+        except Exception:
+            log.debug("unusable fee info %r", fee)
+        return self._fee(price, qty)
+
+    # ------------------------------------------------- order submission / reconciliation
+    @staticmethod
+    def _client_id() -> str:
+        return "ewb" + uuid.uuid4().hex[:24]
+
+    def _order_params(self, params: dict, cid: str) -> dict:
+        out = dict(params)
+        out["clientOrderId"] = cid
+        if getattr(self.exchange, "id", "") == "cryptocom":
+            out["client_oid"] = cid          # ccxt's cryptocom ignores the unified clientOrderId
+        return out
+
+    @staticmethod
+    def _matches(obj: Any, cid: str) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        if obj.get("clientOrderId") == cid:
+            return True
+        info = obj.get("info") or {}
+        return isinstance(info, dict) and cid in (info.get("client_oid"), info.get("clientOrderId"),
+                                                  info.get("client_order_id"))
+
+    def _reconcile(self, symbol: str, cid: str, since: int) -> dict | None:
+        """Find an order sent with client id `cid` whose create_order call failed on the network."""
+        ex = self.exchange
+        try:
+            lookup = {"clientOrderId": cid}
+            if getattr(ex, "id", "") == "cryptocom":
+                lookup["client_oid"] = cid
+            order = ex.fetch_order(cid, symbol, lookup)
+            if order and (self._matches(order, cid) or order.get("id")):
+                return order
+        except Exception as exc:
+            log.debug("reconcile fetch_order(%s) failed: %s", cid, exc)
+        for name in ("fetch_open_orders", "fetch_closed_orders"):
+            fn = getattr(ex, name, None)
+            if not callable(fn):
+                continue
+            try:
+                for order in fn(symbol, since) or []:
+                    if self._matches(order, cid):
+                        return order
+            except Exception as exc:
+                log.debug("reconcile %s failed: %s", name, exc)
+        try:
+            trades = [t for t in (ex.fetch_my_trades(symbol, since) or []) if self._matches(t, cid)]
+        except Exception as exc:
+            log.debug("reconcile fetch_my_trades failed: %s", exc)
+            trades = []
+        if trades:
+            qty = sum(float(t.get("amount") or 0.0) for t in trades)
+            if qty > _EPS:
+                cost = sum(float(t.get("amount") or 0.0) * float(t.get("price") or 0.0) for t in trades)
+                fees = [t.get("fee") or {} for t in trades]
+                fee_cost = sum(float(f.get("cost") or 0.0) for f in fees)
+                curs = {f.get("currency") for f in fees if f.get("currency")}
+                order = {"id": trades[0].get("order"), "clientOrderId": cid, "filled": qty,
+                         "average": cost / qty, "status": "closed"}
+                if len(curs) == 1:
+                    order["fee"] = {"cost": fee_cost, "currency": curs.pop()}
+                return order
+        return None
+
+    def _submit(self, symbol: str, side: str, amount: float, price: float | None, params: dict,
+                ref: float) -> tuple[float, float, dict] | None:
+        """Send a market order with a client id; returns the actual (filled, avg, order) or None."""
+        cid = self._client_id()
+        since = int(time.time() * 1000) - 120_000
+        try:
+            order = self.exchange.create_order(symbol, "market", side, amount, price,
+                                               self._order_params(params, cid))
+        except ccxt.NetworkError as exc:
+            log.warning("create_order %s %s %s: network error (%s) - reconciling client id %s",
+                        side, amount, symbol, exc, cid)
+            order = self._reconcile(symbol, cid, since)
+            if order is None:
+                log.error("order %s %s %s (client id %s) not found after network error - nothing booked",
+                          side, amount, symbol, cid)
+                return None
+            log.warning("order %s found after network error: id=%s filled=%s", cid, order.get("id"),
+                        order.get("filled"))
+        return self._order_fill(order, symbol, ref)
 
     def _place_stop(self, p: Position) -> None:
         if not self.place_exchange_stops or p.qty_open <= _EPS:
@@ -426,7 +567,8 @@ class CcxtBroker(Broker):
             log.exception("fetch_ticker %s failed", symbol)
             return 0.0
 
-    def equity(self) -> float:
+    def equity(self) -> float | None:
+        """Quote equity; the last known value if fetch_balance fails, None if never known."""
         bal = self._balance()
         if bal is None:
             return self._last_equity
@@ -479,12 +621,17 @@ class CcxtBroker(Broker):
                             symbol, amount, amount * ref, min_cost, min_amount)
                 return None
             side = "buy" if signal.side is Side.LONG else "sell"
-            order = self.exchange.create_order(symbol, "market", side, amount, ref, {})
-            filled, avg = self._order_fill(order, symbol, amount, ref)
-            if filled <= 0:
+            res = self._submit(symbol, side, amount, ref, {}, ref)
+            if res is None:
+                log.warning("live open %s: no fill booked", symbol)
                 return None
-            fee = self._fee(avg, filled)
+            filled, avg, order = res
+            fee = self._order_fee(order, symbol, avg, filled)
+            if equity_before is None:
+                equity_before = 0.0
             pos = self._make_position(signal, filled, avg, fee, ts, equity_before)
+            if order.get("clientOrderId"):
+                pos.tags["entry_client_id"] = str(order["clientOrderId"])
             if order and order.get("id"):
                 pos.tags["entry_order_id"] = str(order["id"])
             log.info("live open %s %s qty=%.8f @ %.6f", pos.id, side, filled, avg)
@@ -502,6 +649,9 @@ class CcxtBroker(Broker):
         symbol = p.symbol
         try:
             self._ensure_markets()
+            done = self._exit_by_exchange_stop(p, ts)
+            if done is not None:
+                return done
             self._cancel_stop(p)
             qty = min(qty, p.qty_open)
             _, min_amount = self._limits(symbol)
@@ -515,7 +665,18 @@ class CcxtBroker(Broker):
             if not is_perp(symbol):
                 bal = self._balance()
                 if bal is not None:
-                    held = float((bal.get("free") or {}).get(self._base(symbol)) or 0.0)
+                    base = self._base(symbol)
+                    total = bal.get("total") or {}
+                    held_total = float(total.get(base) or 0.0) if base in total else None
+                    if held_total is not None and (held_total <= _EPS or self._amount(symbol, held_total) <= 0):
+                        log.warning("live close %s: no %s held on the exchange - position already flat "
+                                    "(exchange stop / manual sell?); booking exit at stop %.6g",
+                                    p.id, base, p.stop)
+                        fill, _ = self._apply_exit(p, p.qty_open, p.stop, self._fee(p.stop, p.qty_open),
+                                                   ts, "stop")
+                        self.set_price(symbol, p.stop)
+                        return fill
+                    held = float((bal.get("free") or {}).get(base) or 0.0)
                     if 0 < held < amount:
                         amount = self._amount(symbol, held)   # fees may have been taken in base
             if amount <= 0:
@@ -524,10 +685,16 @@ class CcxtBroker(Broker):
                 return None
             side = "sell" if p.side is Side.LONG else "buy"
             params: dict[str, Any] = {"reduceOnly": True} if is_perp(symbol) else {}
-            order = self.exchange.create_order(symbol, "market", side, amount, price_hint or None, params)
-            filled, avg = self._order_fill(order, symbol, amount, price_hint or p.entry)
-            booked = p.qty_open if full else min(filled, p.qty_open)
-            fee = self._fee(avg, filled)
+            res = self._submit(symbol, side, amount, price_hint or None, params, price_hint or p.entry)
+            if res is None:
+                log.warning("live close %s: exit order not filled - position kept", p.id)
+                if p in self._positions and "stop_order_id" not in p.tags:
+                    self._place_stop(p)
+                return None
+            filled, avg, order = res
+            complete = filled >= amount * (1 - 1e-6)
+            booked = p.qty_open if (full and complete) else min(filled, p.qty_open)
+            fee = self._order_fee(order, symbol, avg, filled)
             fill, _ = self._apply_exit(p, booked, avg, fee, ts, reason)
             self.set_price(symbol, avg)
             if p in self._positions:
@@ -538,6 +705,34 @@ class CcxtBroker(Broker):
             if p in self._positions and "stop_order_id" not in p.tags:
                 self._place_stop(p)
             return None
+
+    def _exit_by_exchange_stop(self, p: Position, ts: int) -> Fill | None:
+        """If the tagged exchange stop order already triggered, book its fill and return the Fill."""
+        oid = p.tags.get("stop_order_id")
+        if not oid:
+            return None
+        try:
+            order = self.exchange.fetch_order(oid, p.symbol) or {}
+        except Exception as exc:
+            log.warning("fetch stop order %s for %s failed: %s", oid, p.id, exc)
+            return None
+        status = order.get("status")
+        filled = float(order.get("filled") or 0.0)
+        if status not in self._DONE and not (status in self._TERMINAL_PARTIAL and filled > _EPS):
+            return None
+        if filled <= _EPS:
+            if status in self._DONE:
+                log.warning("stop order %s for %s is %s without a fill quantity", oid, p.id, status)
+            return None
+        p.tags.pop("stop_order_id", None)
+        price = float(order.get("average") or order.get("price") or p.stop)
+        whole = filled >= self._amount(p.symbol, p.qty_open) * (1 - 1e-6) - _EPS
+        booked = p.qty_open if whole else min(filled, p.qty_open)
+        fee = self._order_fee(order, p.symbol, price, filled)
+        log.warning("exchange stop %s for %s already executed: %.8f @ %.6g", oid, p.id, filled, price)
+        fill, _ = self._apply_exit(p, booked, price, fee, ts, "stop")
+        self.set_price(p.symbol, price)
+        return fill
 
     def update_stop(self, position: Position, new_stop: float) -> None:
         super().update_stop(position, new_stop)

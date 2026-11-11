@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 
 from .config import MarketCfg, RiskCfg
@@ -56,8 +57,17 @@ class RiskManager:
         return qty
 
     # ------------------------------------------------------------------ gating
-    def set_day_start(self, equity: float, ts: int) -> None:
-        self.day_start_equity = float(equity)
+    def set_day_start(self, equity: float | None, ts: int) -> None:
+        """Reset the daily loss-cap baseline. Unknown / non-positive equity is ignored (a 0 baseline
+        would silently disable the daily loss cap); the previous baseline stays in force."""
+        try:
+            value = float(equity) if equity is not None else float("nan")
+        except (TypeError, ValueError):
+            value = float("nan")
+        if not math.isfinite(value) or value <= 0:
+            log.warning("set_day_start ignored: equity %r is unknown or <= 0", equity)
+            return
+        self.day_start_equity = value
         self.day_start_ts = int(ts)
 
     def day_pnl_pct(self, equity: float) -> float:

@@ -228,8 +228,31 @@ class Bot:
         except Exception:
             return []
 
+    def _equity_known(self) -> Optional[float]:
+        """Broker equity, or None while it is unknown (no balance fetched yet / not a finite number)."""
+        value = self.broker.equity()
+        if value is None:
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+
     def _equity(self) -> float:
-        return float(self.broker.equity())
+        """Equity for display / reporting; NaN while unknown."""
+        value = self._equity_known()
+        return float("nan") if value is None else value
+
+    def _free_cash(self) -> Optional[float]:
+        """Cash available for a new spot entry (PaperBroker.free_cash, else broker.cash())."""
+        for name in ("free_cash", "cash"):
+            fn = getattr(self.broker, name, None)
+            if callable(fn):
+                try:
+                    value = fn()
+                    return None if value is None else float(value)
+                except Exception as exc:
+                    self.log.warning("broker.%s failed: %s", name, exc)
+                    return None
+        return None
 
     def _positions(self, symbol: str | None = None) -> list[Position]:
         pos = list(self.broker.positions())
@@ -268,7 +291,12 @@ class Bot:
         today = utc_date(now_ms)
         if self.day_start.get("date") == today:
             return
-        equity = self._equity()
+        equity = self._equity_known()
+        if equity is None or equity <= 0:
+            # never take an unknown/zero equity as the daily baseline (it would disable the loss cap);
+            # retried on the next call, entries are skipped meanwhile
+            self.log.warning("day rollover to %s postponed: equity unknown (%s)", today, equity)
+            return
         prev = dict(self.day_start)
         self.day_start = {"date": today, "equity": equity, "ts": now_ms}
         self.risk.set_day_start(equity, now_ms)
@@ -322,7 +350,8 @@ class Bot:
         records = self.broker.on_candle(symbol, candle) or []
         for rec in records:
             self.log.info("%s closed by broker: %s pnl=%.4f", symbol, rec.reason, rec.pnl)
-        self._report_partial_fills(symbol)
+        if self._report_partial_fills(symbol) or records:
+            self.persist()                     # exits / TP1 partials are on disk immediately
 
         # 2. position management
         atr_now = last_atr(exec_candles[-(self.cfg.swing.atr_period * 5):], self.cfg.swing.atr_period)
@@ -333,7 +362,8 @@ class Bot:
                 self.log.warning("risk.manage failed for %s: %s", pos.id, exc)
                 continue
             for action, value in actions:
-                self._execute_action(pos, action, float(value), candle, now_ms)
+                if self._execute_action(pos, action, float(value), candle, now_ms):
+                    self.persist()
         self._report_new_trades()
 
         # 3. new entries
@@ -354,10 +384,14 @@ class Bot:
         if sig.side is Side.SHORT and not market.allow_short:
             self.log.info("%s short signal ignored (allow_short=false)", symbol)
             return None
-        return self._try_open(sig, market, now_ms)
+        return self._try_open(sig, market, now_ms, candle.ts)
 
-    def _try_open(self, sig: Signal, market: MarketCfg, now_ms: int) -> Optional[Position]:
-        equity = self._equity()
+    def _try_open(self, sig: Signal, market: MarketCfg, now_ms: int,
+                  candle_ts: Optional[int] = None) -> Optional[Position]:
+        equity = self._equity_known()
+        if equity is None:
+            self.log.warning("%s signal skipped: equity unknown (balance not available)", sig.symbol)
+            return None
         ok, reason = self.risk.can_open(now_ms, equity, self._positions(), self._safe_trades(), sig.symbol)
         if not ok:
             self.log.info("%s %s %s signal blocked: %s", sig.symbol, sig.side.value, sig.setup.value, reason)
@@ -366,16 +400,31 @@ class Bot:
         if qty <= 0:
             self.log.info("%s signal skipped: size 0 (equity %.2f below exchange minimum?)", sig.symbol, equity)
             return None
+        if ":" not in sig.symbol:              # spot: no leverage -> needs free cash for the order
+            free = self._free_cash()
+            min_notional = max(self._min_notional(market), 1e-9)
+            if free is not None and free < min_notional:
+                self.log.info("%s signal skipped: free cash %.4f below min notional %.4f", sig.symbol,
+                              free, min_notional)
+                return None
         self.log.info("SIGNAL %s %s %s entry=%.6g stop=%.6g tp1=%.6g tp2=%.6g score=%.2f qty=%.8g | %s",
                       sig.symbol, sig.side.value, sig.setup.value, sig.entry, sig.stop, sig.tp1, sig.tp2,
                       sig.score, qty, "; ".join(sig.reasons))
         if self.cfg.telegram.notify_signals:
             self.notify(self._fmt("format_signal", self._signal_text(sig), sig))
+        # mark the candle as consumed BEFORE sending the order: a crash after the fill must not lead to
+        # a second entry on the same candle after a restart
+        if candle_ts is not None:
+            self.last_seen[sig.symbol] = max(int(candle_ts), int(self.last_seen.get(sig.symbol, candle_ts)))
+            self.persist()
         pos = self.broker.open(sig, qty, now_ms)
         fills = [f for f in self._pop_fills() if f.reason == "entry"]
         if pos is None:
             self.log.warning("%s entry order failed / rejected", sig.symbol)
             return None
+        if candle_ts is not None:
+            pos.tags["signal_ts"] = str(int(candle_ts))   # broker checks stops from the next candle on
+        self.persist()
         # remember the initial risk so R-multiples stay correct after BE / trailing moves
         try:
             pos.tags.setdefault("stop0", f"{sig.stop:.10g}")
@@ -391,18 +440,20 @@ class Bot:
             self.notify(self._fmt("format_fill", self._open_text(pos), entry_fill, pos))
         return pos
 
-    def _execute_action(self, pos: Position, action: str, value: float, candle: Candle, now_ms: int) -> None:
+    def _execute_action(self, pos: Position, action: str, value: float, candle: Candle, now_ms: int) -> bool:
+        """Execute one management action; True if position state changed (caller persists)."""
         if pos.qty_open <= 0:
-            return
+            return False
         if action == "stop":
             if value > 0 and value != pos.stop:
                 self.broker.update_stop(pos, value)
                 if abs(value - pos.entry) <= 1e-12 * max(1.0, abs(pos.entry)):
                     pos.be_moved = True
                 self.log.info("%s stop -> %.6g", pos.id, value)
-            return
+                return True
+            return False
         if action == "tp1" and pos.tp1_done:
-            return  # broker already took the partial inside the candle
+            return False  # broker already took the partial inside the candle
         reason = {"tp1": "tp1", "close": "time"}.get(action, action)
         qty = min(value, pos.qty_open) if value > 0 else pos.qty_open
         fill = self.broker.close(pos, qty, candle.close, now_ms, reason)
@@ -414,6 +465,8 @@ class Bot:
             if self.cfg.telegram.notify_fills and pos.qty_open > 0:
                 self.notify(self._fmt("format_fill", f"{reason}: {pos.symbol} {fill.qty:.8g} @ {fill.price:.6g}",
                                       fill, pos))
+            return True
+        return False
 
     def _pop_fills(self) -> list[Fill]:
         fn = getattr(self.broker, "pop_fills", None)
@@ -424,10 +477,12 @@ class Bot:
         except Exception:
             return []
 
-    def _report_partial_fills(self, symbol: str) -> None:
-        """Notify partial exits the broker made inside the candle (TP1); full exits go via trades."""
+    def _report_partial_fills(self, symbol: str) -> int:
+        """Notify partial exits the broker made inside the candle (TP1); full exits go via trades.
+        Returns the number of fills drained."""
         open_pos = {p.symbol: p for p in self._positions(symbol)}
-        for fill in self._pop_fills():
+        fills = self._pop_fills()
+        for fill in fills:
             pos = open_pos.get(fill.symbol)
             if fill.reason == "entry" or pos is None or pos.qty_open <= 0:
                 continue
@@ -435,6 +490,7 @@ class Bot:
             if self.cfg.telegram.notify_fills:
                 self.notify(self._fmt("format_fill", f"{fill.reason}: {fill.symbol} {fill.qty:.8g} @ {fill.price:.6g}",
                                       fill, pos))
+        return len(fills)
 
     def _report_new_trades(self) -> None:
         trades = self._safe_trades()
@@ -490,7 +546,8 @@ class Bot:
         if seen is not None:
             for c in candles[:-1]:
                 if c.ts > seen:
-                    self.broker.on_candle(symbol, c)
+                    if self.broker.on_candle(symbol, c):
+                        self.persist()
         htf = {tf: self.data.fetch(symbol, tf) for tf in self.cfg.strategy.htf_timeframes}
         self.process_candle(symbol, candles, htf, now_ms)
         self.last_seen[symbol] = newest
@@ -531,6 +588,12 @@ class Bot:
             return self._equity()
         except Exception:
             return float("nan")
+
+    def _state_equity(self) -> Optional[float]:
+        try:
+            return self._equity_known()
+        except Exception:
+            return None
 
     def stop(self, *_: Any) -> None:
         self._stop_requested = True
@@ -595,6 +658,7 @@ class Bot:
                 price = pos.entry
             if self.broker.close(pos, pos.qty_open, price, now_ms, reason) is not None:
                 n += 1
+                self.persist()
         self._report_new_trades()
         return n
 
@@ -637,7 +701,7 @@ class Bot:
             "day_start": dict(self.day_start),
             "last_summary_date": self.last_summary_date,
             "trades_count": self.trades_count,
-            "equity": self._safe_equity(),
+            "equity": self._state_equity(),
             "positions": [to_pos(p) for p in self._positions()],
             "trades": [to_tr(t) for t in self._safe_trades()[-200:]],
             "last_signal": dict(self.last_signal),

@@ -307,3 +307,75 @@ def test_daily_summary_sent_once_per_day(tmp_path):
     bot.check_day_rollover(T0 + 86_400_000 + 1)
     assert len(risk.day_starts) == 2
     assert bot.maybe_daily_summary(T0 + 86_400_000 + 21 * 3_600_000 + 1) is True
+
+
+# ------------------------------------------------------------------------------------ audit fixes
+
+def test_last_seen_persisted_before_entry_and_position_right_after(tmp_path):
+    bot, broker, strat, risk, notif = make_bot(tmp_path)
+    exec_c = candles(50)
+    seen_on_disk = []
+    orig_open = broker.open
+
+    def spy_open(signal, qty, ts):
+        seen_on_disk.append(json.loads(open(bot.cfg.state_file, encoding="utf-8").read())["last_seen"])
+        return orig_open(signal, qty, ts)
+
+    broker.open = spy_open
+    pos = bot.process_candle("BTC/USD", exec_c, HTF, exec_c[-1].ts + TF)
+    assert pos is not None
+    assert seen_on_disk == [{"BTC/USD": exec_c[-1].ts}]                # written before the order
+    state = json.loads(open(bot.cfg.state_file, encoding="utf-8").read())
+    assert [p["id"] for p in state["positions"]] == [pos.id]          # persisted without step()
+    assert pos.tags["signal_ts"] == str(exec_c[-1].ts)
+
+
+def test_close_all_and_management_close_persist_immediately(tmp_path):
+    bot, broker, strat, risk, notif = make_bot(tmp_path, side=None)
+    broker.open(make_signal("BTC/USD"), 1.0, T0)
+    broker.open(make_signal("ETH/USD"), 1.0, T0)
+    risk.actions = [("close", 1.0)]
+    bot.process_candle("BTC/USD", candles(50), HTF, T0 + 51 * TF)
+    state = json.loads(open(bot.cfg.state_file, encoding="utf-8").read())
+    assert [p["symbol"] for p in state["positions"]] == ["ETH/USD"]
+    risk.actions = []
+    assert bot.close_all(T0 + 52 * TF) == 1
+    assert json.loads(open(bot.cfg.state_file, encoding="utf-8").read())["positions"] == []
+
+
+def test_unknown_equity_skips_day_reset_and_entries(tmp_path):
+    bot, broker, strat, risk, notif = make_bot(tmp_path)
+    broker._equity = None
+    bot.check_day_rollover(T0)
+    assert risk.day_starts == [] and bot.day_start == {}
+    assert bot.process_candle("BTC/USD", candles(50), HTF, T0 + 51 * TF) is None
+    assert broker.opened == []
+    broker._equity = 20.0
+    bot.check_day_rollover(T0 + 1)
+    assert risk.day_starts == [(20.0, T0 + 1)]
+
+
+def test_spot_entry_skipped_without_free_cash(tmp_path):
+    bot, broker, strat, risk, notif = make_bot(tmp_path)
+    broker.cash = lambda: 0.0
+    assert bot.process_candle("BTC/USD", candles(50), HTF, T0 + 51 * TF) is None
+    assert broker.opened == []
+
+
+def test_paper_stop_in_bar_after_entry_is_executed_through_bot(tmp_path):
+    from ewbot.broker import PaperBroker
+
+    cfg = make_cfg(tmp_path)
+    cfg.markets = [MarketCfg("BTC/USD:USD")]
+    broker, strat = PaperBroker(cfg, start_equity=1000.0), StubStrategy(Side.LONG)
+    bot = Bot(cfg, None, broker, strat, StubRisk(qty=1.0), StubNotifier(), logging.getLogger("test"),
+              persist_enabled=False)
+    exec_c = candles(50)
+    pos = bot.process_candle("BTC/USD:USD", exec_c, HTF, exec_c[-1].ts + TF)     # entry on bar N
+    assert pos is not None
+    strat.signal_side = None
+    nxt = Candle(exec_c[-1].ts + TF, pos.entry, pos.entry + 0.1, pos.stop - 0.5, pos.stop - 0.2, 1.0)
+    bot.process_candle("BTC/USD:USD", exec_c + [nxt], HTF, nxt.ts + TF)          # stop inside bar N+1
+    assert broker.positions() == []
+    tr = broker.trades()[0]
+    assert tr.reason == "stop" and tr.closed_ts == nxt.ts + TF
